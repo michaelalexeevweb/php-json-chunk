@@ -25,7 +25,8 @@
         }
     },
     "scripts": {
-        "test": "phpunit"
+        "test": "phpunit",
+        "test:performance": "RUN_PERFORMANCE_TESTS=1 phpunit --group performance"
     },
     "minimum-stability": "stable",
     "prefer-stable": true
