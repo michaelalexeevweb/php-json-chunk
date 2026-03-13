@@ -13,6 +13,9 @@ interface JsonChunkReaderInterface
      * Reads a JSON file and returns data split into chunks.
      *
      * @return array<int, array<int, mixed>>
+     *
+     * @throws \InvalidArgumentException
+     * @throws \RuntimeException
      */
     public function read(
         string $filePath,
@@ -24,6 +27,9 @@ interface JsonChunkReaderInterface
 
     /**
      * Returns an iterator of items (or chunks when chunk size is provided).
+     *
+     * @throws \InvalidArgumentException
+     * @throws \RuntimeException
      */
     public function readIterator(
         string $filePath,
@@ -37,6 +43,9 @@ interface JsonChunkReaderInterface
      * Returns a generator of items (or chunks when chunk size is provided).
      *
      * @return Generator<int, mixed>
+     *
+     * @throws \InvalidArgumentException
+     * @throws \RuntimeException
      */
     public function readGenerator(
         string $filePath,
