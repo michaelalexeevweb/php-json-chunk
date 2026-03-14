@@ -22,49 +22,125 @@ declare(strict_types=1);
 use PhpJsonChunk\JsonChunkReader;
 
 $reader = new JsonChunkReader();
+$filePath = __DIR__ . '/data.json';
 
 // Returns total number of items in target array
-$total = $reader->count(__DIR__ . '/data.json');
+$total = $reader->count(
+    filePath: $filePath,
+);
 
 // Returns one chunk with all items from target list
-$all = $reader->read(__DIR__ . '/data.json');
+$all = $reader->read(
+    filePath: $filePath,
+    chunkSize: null,
+    limit: null,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: null,
+);
 
 // Returns chunks of 2 items
-$chunks = $reader->read(__DIR__ . '/data.json', 2);
+$chunks = $reader->read(
+    filePath: $filePath,
+    chunkSize: 2,
+    limit: null,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: null,
+);
 
 // Read from nested key path (example: key1.0.key2.0.key3)
-$nested = $reader->read(__DIR__ . '/data.json', null, null, 0, 'key1.0.key2.0.key3');
+$nested = $reader->read(
+    filePath: $filePath,
+    chunkSize: null,
+    limit: null,
+    offset: 0,
+    keyPath: 'key1.0.key2.0.key3',
+    tempChunkDir: null,
+);
 
 // Limit and offset support
-$window = $reader->read(__DIR__ . '/data.json', null, 10, 20);
+$window = $reader->read(
+    filePath: $filePath,
+    chunkSize: null,
+    limit: 10,
+    offset: 20,
+    keyPath: null,
+    tempChunkDir: null,
+);
 
 // Optional directory for temporary chunk files used by read()
-$window = $reader->read(__DIR__ . '/data.json', 500, 10_000, 0, null, __DIR__ . '/var/chunks');
+$windowWithTempChunks = $reader->read(
+    filePath: $filePath,
+    chunkSize: 500,
+    limit: 10_000,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: __DIR__ . '/var/chunks',
+);
 
 // Total stays independent from limit/offset
-$total = $reader->count(__DIR__ . '/data.json', 'key1.0.key2.0.key3');
+$totalNested = $reader->count(
+    filePath: $filePath,
+    keyPath: 'key1.0.key2.0.key3',
+);
 
 // Iterator with plain items (memory-friendly for large files)
-$iterator = $reader->readIterator(__DIR__ . '/data.json', null, 2, 1);
+$iterator = $reader->readIterator(
+    filePath: $filePath,
+    chunkSize: null,
+    limit: 2,
+    offset: 1,
+    keyPath: null,
+    tempChunkDir: null,
+);
 foreach ($iterator as $item) {
     var_dump($item);
 }
 
 // Optional directory for temporary chunk files used by readIterator()
-$iterator = $reader->readIterator(__DIR__ . '/data.json', 500, 10_000, 0, null, __DIR__ . '/var/chunks');
+$iteratorWithTempChunks = $reader->readIterator(
+    filePath: $filePath,
+    chunkSize: 500,
+    limit: 10_000,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: __DIR__ . '/var/chunks',
+);
 
 // Generator with chunks
-$generator = $reader->readGenerator(__DIR__ . '/data.json', 2);
+$generator = $reader->readGenerator(
+    filePath: $filePath,
+    chunkSize: 2,
+    limit: null,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: null,
+);
 foreach ($generator as $chunk) {
     var_dump($chunk);
 }
 
 // Optional directory for temporary chunk files used by readGenerator()
-$generator = $reader->readGenerator(__DIR__ . '/data.json', 500, 10_000, 0, null, __DIR__ . '/var/chunks');
+$generatorWithTempChunks = $reader->readGenerator(
+    filePath: $filePath,
+    chunkSize: 500,
+    limit: 10_000,
+    offset: 0,
+    keyPath: null,
+    tempChunkDir: __DIR__ . '/var/chunks',
+);
 
 // Iterator from nested key path with limit/offset
-$iterator = $reader->readIterator(__DIR__ . '/data.json', null, 10, 0, 'key1.0.key2.0.key3');
-foreach ($iterator as $item) {
+$iteratorNested = $reader->readIterator(
+    filePath: $filePath,
+    chunkSize: null,
+    limit: 10,
+    offset: 0,
+    keyPath: 'key1.0.key2.0.key3',
+    tempChunkDir: null,
+);
+foreach ($iteratorNested as $item) {
     var_dump($item);
 }
 ```
