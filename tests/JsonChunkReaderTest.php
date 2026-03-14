@@ -6,13 +6,13 @@ namespace PhpJsonChunk\Tests;
 
 use InvalidArgumentException;
 use PhpJsonChunk\JsonChunkReader;
-use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
-final class JsonChunkReaderTest extends TestCase
+final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
 {
     private JsonChunkReader $reader;
 
+    #[\Override]
     protected function setUp(): void
     {
         $this->reader = new JsonChunkReader();
@@ -105,6 +105,86 @@ final class JsonChunkReaderTest extends TestCase
             ],
             $result,
         );
+    }
+
+    public function testReadSupportsTemporaryChunkDirectory(): void
+    {
+        $tempChunkDir = sys_get_temp_dir() . '/php_json_chunk_' . uniqid(more_entropy: true);
+
+        try {
+            $result = $this->reader->read(
+                __DIR__ . '/fixtures/sample-array.json',
+                tempChunkDir: $tempChunkDir,
+            );
+
+            self::assertSame(
+                [[
+                    ['id' => 1],
+                    ['id' => 2],
+                    ['id' => 3],
+                ]],
+                $result,
+            );
+            self::assertDirectoryExists($tempChunkDir);
+            self::assertSame([], glob($tempChunkDir . '/*') ?: []);
+        } finally {
+            $this->removeDirectoryIfExists($tempChunkDir);
+        }
+    }
+
+    public function testReadIteratorSupportsTemporaryChunkDirectory(): void
+    {
+        $tempChunkDir = sys_get_temp_dir() . '/php_json_chunk_iterator_' . uniqid(more_entropy: true);
+
+        try {
+            $iterator = $this->reader->readIterator(
+                __DIR__ . '/fixtures/sample-array.json',
+                2,
+                tempChunkDir: $tempChunkDir,
+            );
+
+            self::assertSame(
+                [
+                    [
+                        ['id' => 1],
+                        ['id' => 2],
+                    ],
+                    [
+                        ['id' => 3],
+                    ],
+                ],
+                iterator_to_array($iterator, false),
+            );
+            self::assertDirectoryExists($tempChunkDir);
+            self::assertSame([], glob($tempChunkDir . '/*') ?: []);
+        } finally {
+            $this->removeDirectoryIfExists($tempChunkDir);
+        }
+    }
+
+    public function testReadGeneratorSupportsTemporaryChunkDirectory(): void
+    {
+        $tempChunkDir = sys_get_temp_dir() . '/php_json_chunk_generator_' . uniqid(more_entropy: true);
+
+        try {
+            $generator = $this->reader->readGenerator(
+                __DIR__ . '/fixtures/sample-array.json',
+                tempChunkDir: $tempChunkDir,
+            );
+
+            self::assertSame(
+                [
+                    ['id' => 1],
+                    ['id' => 2],
+                    ['id' => 3],
+                ],
+                iterator_to_array($generator, false),
+            );
+            self::assertDirectoryExists($tempChunkDir);
+            self::assertSame([], glob($tempChunkDir . '/*') ?: []);
+        } finally {
+            $this->removeDirectoryIfExists($tempChunkDir);
+        }
     }
 
     public function testReadIteratorReturnsItemsWhenChunkSizeIsNotProvided(): void
@@ -211,7 +291,7 @@ final class JsonChunkReaderTest extends TestCase
                 $items,
             );
         } finally {
-            @unlink($filePath);
+            $this->removeFileIfExists($filePath);
         }
     }
 
@@ -239,7 +319,7 @@ final class JsonChunkReaderTest extends TestCase
                 $items,
             );
         } finally {
-            @unlink($filePath);
+            $this->removeFileIfExists($filePath);
         }
     }
 
@@ -315,11 +395,25 @@ final class JsonChunkReaderTest extends TestCase
 
         $written = file_put_contents($path, $content);
         if ($written === false) {
-            @unlink($path);
+            $this->removeFileIfExists($path);
             self::fail('Unable to write temp JSON fixture for test.');
         }
 
         return $path;
+    }
+
+    private function removeFileIfExists(string $path): void
+    {
+        if (is_file($path)) {
+            unlink($path);
+        }
+    }
+
+    private function removeDirectoryIfExists(string $path): void
+    {
+        if (is_dir($path)) {
+            rmdir($path);
+        }
     }
 
     private function buildArrayJson(int $count): string

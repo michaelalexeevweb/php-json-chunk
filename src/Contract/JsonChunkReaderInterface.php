@@ -33,6 +33,7 @@ interface JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
     ): array;
 
     /**
@@ -47,6 +48,7 @@ interface JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
     ): Iterator;
 
     /**
@@ -63,5 +65,6 @@ interface JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
     ): Generator;
 }

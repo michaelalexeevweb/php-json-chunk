@@ -13,6 +13,8 @@ use RuntimeException;
 
 final class JsonChunkReader implements JsonChunkReaderInterface
 {
+    private const int DEFAULT_TEMP_CHUNK_SIZE = 1000;
+
     /**
      * @var array<int, string>
      */
@@ -49,13 +51,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
     ): array {
         $this->assertChunkSize($chunkSize);
         $this->assertLimitAndOffset($limit, $offset);
 
         $result = [];
 
-        foreach ($this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath) as $item) {
+        foreach ($this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir) as $item) {
             $result[] = $item;
         }
 
@@ -76,11 +79,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
     ): Iterator {
         $this->assertChunkSize($chunkSize);
         $this->assertLimitAndOffset($limit, $offset);
 
-        return $this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath);
+        return $this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir);
     }
 
     /**
@@ -95,6 +99,34 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int|null $limit = null,
         int $offset = 0,
         string|null $keyPath = null,
+        string|null $tempChunkDir = null,
+    ): Generator {
+        $this->assertChunkSize($chunkSize);
+        $this->assertLimitAndOffset($limit, $offset);
+
+        if ($tempChunkDir !== null && $tempChunkDir !== '') {
+            $chunkFiles = $this->createTemporaryChunkFiles($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir);
+
+            yield from $this->yieldFromTemporaryChunks($chunkFiles, $chunkSize === null);
+
+            return;
+        }
+
+        yield from $this->readGeneratorWithoutTemporaryChunks($filePath, $chunkSize, $limit, $offset, $keyPath);
+    }
+
+    /**
+     * @return Generator<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function readGeneratorWithoutTemporaryChunks(
+        string $filePath,
+        int|null $chunkSize,
+        int|null $limit,
+        int $offset,
+        string|null $keyPath,
     ): Generator {
         $this->assertChunkSize($chunkSize);
         $this->assertLimitAndOffset($limit, $offset);
@@ -140,6 +172,73 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         } finally {
             fclose($handle);
             $this->charBuffer = [];
+        }
+    }
+
+    /**
+     * @return array<int, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function createTemporaryChunkFiles(
+        string $filePath,
+        int|null $chunkSize,
+        int|null $limit,
+        int $offset,
+        string|null $keyPath,
+        string $tempChunkDir,
+    ): array {
+        $resolvedTempChunkDir = $this->prepareTempChunkDirectory($tempChunkDir);
+        $streamChunkSize = $chunkSize ?? self::DEFAULT_TEMP_CHUNK_SIZE;
+        $chunkFiles = [];
+
+        try {
+            foreach ($this->readGeneratorWithoutTemporaryChunks($filePath, $streamChunkSize, $limit, $offset, $keyPath) as $chunk) {
+                if (!is_array($chunk)) {
+                    throw new RuntimeException('Temporary chunk serialization expects an array chunk.');
+                }
+
+                $chunkFiles[] = $this->writeTemporaryChunk($resolvedTempChunkDir, $chunk);
+            }
+        } catch (RuntimeException|InvalidArgumentException $exception) {
+            foreach ($chunkFiles as $chunkFile) {
+                $this->removeFileIfExists($chunkFile);
+            }
+
+            throw $exception;
+        }
+
+        return $chunkFiles;
+    }
+
+    /**
+     * @param array<int, string> $chunkFiles
+     *
+     * @return Generator<int, mixed>
+     *
+     * @throws RuntimeException
+     */
+    private function yieldFromTemporaryChunks(array $chunkFiles, bool $yieldItems): Generator
+    {
+        try {
+            foreach ($chunkFiles as $chunkFile) {
+                $chunk = $this->readTemporaryChunk($chunkFile);
+
+                if ($yieldItems) {
+                    foreach ($chunk as $item) {
+                        yield $item;
+                    }
+
+                    continue;
+                }
+
+                yield $chunk;
+            }
+        } finally {
+            foreach ($chunkFiles as $chunkFile) {
+                $this->removeFileIfExists($chunkFile);
+            }
         }
     }
 
@@ -791,6 +890,81 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return sprintf('Invalid JSON in file "%s": %s', $filePath, $detail);
+    }
+
+    /**
+     * @throws RuntimeException
+     */
+    private function prepareTempChunkDirectory(string $tempChunkDir): string
+    {
+        if (!is_dir($tempChunkDir) && !mkdir($tempChunkDir, 0777, true) && !is_dir($tempChunkDir)) {
+            throw new RuntimeException(sprintf('Unable to create temporary chunk directory "%s".', $tempChunkDir));
+        }
+
+        return rtrim($tempChunkDir, DIRECTORY_SEPARATOR);
+    }
+
+    /**
+     * @param array<int, mixed> $chunk
+     *
+     * @throws RuntimeException
+     */
+    private function writeTemporaryChunk(string $tempChunkDir, array $chunk): string
+    {
+        $tempFilePath = tempnam($tempChunkDir, 'json_chunk_');
+        if ($tempFilePath === false) {
+            throw new RuntimeException(sprintf('Unable to create temporary chunk file in "%s".', $tempChunkDir));
+        }
+
+        try {
+            $encodedChunk = json_encode($chunk, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            $this->removeFileIfExists($tempFilePath);
+
+            throw new RuntimeException('Unable to encode temporary chunk file.', 0, $exception);
+        }
+
+        $writtenBytes = file_put_contents($tempFilePath, $encodedChunk);
+        if ($writtenBytes === false) {
+            $this->removeFileIfExists($tempFilePath);
+
+            throw new RuntimeException(sprintf('Unable to write temporary chunk file "%s".', $tempFilePath));
+        }
+
+        return $tempFilePath;
+    }
+
+
+    /**
+     * @return array<int, mixed>
+     *
+     * @throws RuntimeException
+     */
+    private function readTemporaryChunk(string $chunkFile): array
+    {
+        $content = file_get_contents($chunkFile);
+        if ($content === false) {
+            throw new RuntimeException(sprintf('Unable to read temporary chunk file "%s".', $chunkFile));
+        }
+
+        try {
+            $decodedChunk = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException(sprintf('Invalid temporary chunk file "%s".', $chunkFile), 0, $exception);
+        }
+
+        if (!is_array($decodedChunk) || !array_is_list($decodedChunk)) {
+            throw new RuntimeException(sprintf('Temporary chunk file "%s" must contain a JSON array list.', $chunkFile));
+        }
+
+        return $decodedChunk;
+    }
+
+    private function removeFileIfExists(string $filePath): void
+    {
+        if (is_file($filePath)) {
+            unlink($filePath);
+        }
     }
 
     private function assertLimitAndOffset(int|null $limit, int $offset): void
