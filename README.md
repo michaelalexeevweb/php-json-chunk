@@ -150,6 +150,7 @@ foreach ($iteratorNested as $item) {
 ```bash
 composer install
 composer test
+composer phpstan
 ```
 
 ## Performance test
