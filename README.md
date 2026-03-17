@@ -1,11 +1,14 @@
 # PhpJsonChunk
 
+[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/michaelalexeevweb/php-json-chunk/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelalexeevweb/php-json-chunk/actions/workflows/ci.yml)
+
 Simple PHP library to stream JSON arrays from files and return plain data, iterators, generators, or chunked arrays.
 
 ## Install
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk
+composer require michaelalexeevweb/php-json-chunk:^1.0.5
 ```
 
 ## Why streaming

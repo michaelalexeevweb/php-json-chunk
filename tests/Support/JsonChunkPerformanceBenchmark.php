@@ -40,7 +40,9 @@ final class JsonChunkPerformanceBenchmark
 
         try {
             gc_collect_cycles();
-            memory_reset_peak_usage();
+            if (function_exists('memory_reset_peak_usage')) {
+                memory_reset_peak_usage();
+            }
             $startUsage = memory_get_usage(false);
             $startTime = hrtime(true);
 

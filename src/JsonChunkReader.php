@@ -13,7 +13,7 @@ use RuntimeException;
 
 final class JsonChunkReader implements JsonChunkReaderInterface
 {
-    private const int DEFAULT_TEMP_CHUNK_SIZE = 1000;
+    private const DEFAULT_TEMP_CHUNK_SIZE = 1000;
 
     /**
      * @var array<int, string>
