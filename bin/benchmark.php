@@ -3,10 +3,152 @@
 
 declare(strict_types=1);
 
+use Clue\JsonStream\StreamingJsonParser;
+use JsonCollectionParser\Parser as JsonCollectionParser;
+use JsonDecodeStream\Parser as JsonDecodeStreamParser;
 use JsonMachine\Items;
+use JsonStreamer\JsonStreamer;
+use JsonStreamingParser\Listener\ListenerInterface;
+use JsonStreamingParser\Parser as SalsifyParser;
 use PhpJsonChunk\JsonChunkReader;
 
 require_once __DIR__ . '/../vendor/autoload.php';
+
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+
+/**
+ * Counts direct elements of a root JSON array while ignoring nested structure depth.
+ */
+final class RootArrayCountListener implements ListenerInterface
+{
+  /**
+   * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+   */
+  function measureCrocodile2uJsonStreamer(string $filePath): array
+  {
+      return measureExecution(static function () use ($filePath): int {
+          $handle = fopen($filePath, 'rb');
+          if ($handle === false) {
+              throw new RuntimeException(sprintf('Unable to open benchmark file "%s".', $filePath));
+          }
+
+          try {
+              // crocodile2u/json-streamer expects root to be an array, no path needed
+              $streamer = new JsonStreamer($handle);
+              $total = 0;
+
+              foreach ($streamer as $item) {
+                  $total++;
+                  /** @phpstan-ignore-next-line */
+                  $_ = $item;
+              }
+
+              return $total;
+          } finally {
+              fclose($handle);
+          }
+      });
+  }
+
+    private int $total = 0;
+
+    /** @var array<int, string> */
+    private array $stack = [];
+
+    private bool $insideRootArray = false;
+
+    private int $rootItemDepth = 0;
+
+    public function startDocument(): void
+    {
+        $this->total = 0;
+        $this->stack = [];
+        $this->insideRootArray = false;
+        $this->rootItemDepth = 0;
+    }
+
+    public function endDocument(): void
+    {
+    }
+
+    public function startObject(): void
+    {
+        if ($this->isStartingRootArrayItem()) {
+            $this->total++;
+            $this->rootItemDepth = 1;
+        } elseif ($this->rootItemDepth > 0) {
+            $this->rootItemDepth++;
+        }
+
+        $this->stack[] = 'object';
+    }
+
+    public function endObject(): void
+    {
+        array_pop($this->stack);
+
+        if ($this->rootItemDepth > 0) {
+            $this->rootItemDepth--;
+        }
+    }
+
+    public function startArray(): void
+    {
+        if ($this->stack === []) {
+            $this->insideRootArray = true;
+        } elseif ($this->isStartingRootArrayItem()) {
+                $this->total++;
+            $this->rootItemDepth = 1;
+        } elseif ($this->rootItemDepth > 0) {
+            $this->rootItemDepth++;
+        }
+
+        $this->stack[] = 'array';
+    }
+
+    public function endArray(): void
+    {
+        $wasRootArray = $this->insideRootArray && $this->rootItemDepth === 0 && count($this->stack) === 1;
+
+        array_pop($this->stack);
+
+        if ($this->rootItemDepth > 0) {
+            $this->rootItemDepth--;
+        }
+
+        if ($wasRootArray) {
+            $this->insideRootArray = false;
+        }
+    }
+
+    public function key(string $key): void
+    {
+    }
+
+    public function value($value)
+    {
+        if ($this->isStartingRootArrayItem()) {
+            $this->total++;
+        }
+    }
+
+    public function whitespace(string $whitespace): void
+    {
+    }
+
+    public function getTotal(): int
+    {
+        return $this->total;
+    }
+
+    private function isStartingRootArrayItem(): bool
+    {
+        return $this->insideRootArray
+            && $this->rootItemDepth === 0
+            && count($this->stack) === 1
+            && $this->stack[0] === 'array';
+    }
+}
 
 /**
  * @param array<int, string> $argv
@@ -16,7 +158,7 @@ require_once __DIR__ . '/../vendor/autoload.php';
 function parseOptions(array $argv): array
 {
     $runs = 3;
-    $sizes = [10_000, 30_000, 50_000, 100_000];
+    $sizes = [10_000, 30_000, 50_000, 100_000, 500_000, 1_000_000];
 
     foreach ($argv as $argument) {
         if ($argument === '--help' || $argument === '-h') {
@@ -70,7 +212,7 @@ function buildDatasetFile(int $count): string
         throw new RuntimeException('Cannot open temp file.');
     }
 
-    fwrite($fh, '{"count":' . $count . ',"data":[');
+    fwrite($fh, '[');
     for ($i = 1; $i <= $count; $i++) {
         if ($i > 1) {
             fwrite($fh, ',');
@@ -81,7 +223,7 @@ function buildDatasetFile(int $count): string
             $i,
         ));
     }
-    fwrite($fh, ']}');
+    fwrite($fh, ']');
     fclose($fh);
 
     return $path;
@@ -90,21 +232,16 @@ function buildDatasetFile(int $count): string
 /**
  * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
  */
-function measurePhpJsonChunk(string $filePath): array
+function measureExecution(callable $callback): array
 {
     gc_collect_cycles();
-    memory_reset_peak_usage();
+    if (function_exists('memory_reset_peak_usage')) {
+        memory_reset_peak_usage();
+    }
     $memStart = memory_get_usage(false);
     $timeStart = hrtime(true);
 
-    $reader = new JsonChunkReader();
-    $total = 0;
-
-    foreach ($reader->readGenerator($filePath, keyPath: 'data') as $item) {
-        $total++;
-        /** @phpstan-ignore-next-line */
-        $_ = $item;
-    }
+    $total = $callback();
 
     return [
         'elapsedMs' => (hrtime(true) - $timeStart) / 1_000_000,
@@ -116,27 +253,115 @@ function measurePhpJsonChunk(string $filePath): array
 /**
  * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
  */
+function measurePhpJsonChunk(string $filePath): array
+{
+    return measureExecution(static function () use ($filePath): int {
+        $reader = new JsonChunkReader();
+        $total = 0;
+
+        foreach ($reader->readGenerator($filePath) as $item) {
+            $total++;
+            /** @phpstan-ignore-next-line */
+            $_ = $item;
+        }
+
+        return $total;
+    });
+}
+
+/**
+ * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+ */
 function measureJsonMachine(string $filePath): array
 {
-    gc_collect_cycles();
-    memory_reset_peak_usage();
-    $memStart = memory_get_usage(false);
-    $timeStart = hrtime(true);
+    return measureExecution(static function () use ($filePath): int {
+        $total = 0;
+        $items = Items::fromFile($filePath);
 
-    $total = 0;
-    $items = Items::fromFile($filePath, ['pointer' => '/data']);
+        foreach ($items as $item) {
+            $total++;
+            /** @phpstan-ignore-next-line */
+            $_ = $item;
+        }
 
-    foreach ($items as $item) {
-        $total++;
-        /** @phpstan-ignore-next-line */
-        $_ = $item;
+        return $total;
+    });
+}
+
+/**
+ * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+ */
+function measureSalsify(string $filePath): array
+{
+    return measureExecution(static function () use ($filePath): int {
+        $handle = fopen($filePath, 'rb');
+        if ($handle === false) {
+            throw new RuntimeException(sprintf('Unable to open benchmark file "%s".', $filePath));
+        }
+
+        try {
+            $listener = new RootArrayCountListener();
+            $parser = new SalsifyParser($handle, $listener);
+            $parser->parse();
+
+            return $listener->getTotal();
+        } finally {
+            fclose($handle);
+        }
+    });
+}
+
+/**
+ * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+ */
+function measureJsonDecodeStream(string $filePath): array
+{
+    return measureExecution(static function () use ($filePath): int {
+        $total = 0;
+        $parser = JsonDecodeStreamParser::fromFile($filePath);
+
+        foreach ($parser->items('[]', true) as $item) {
+            $total++;
+            /** @phpstan-ignore-next-line */
+            $_ = $item;
+        }
+
+        return $total;
+    });
+}
+
+/**
+ * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+ */
+function measureJsonCollectionParser(string $filePath): array
+{
+    return measureExecution(static function () use ($filePath): int {
+        $total = 0;
+        $parser = new JsonCollectionParser();
+        $parser->parse($filePath, static function (array $item) use (&$total): void {
+            $total++;
+            /** @phpstan-ignore-next-line */
+            $_ = $item;
+        });
+
+        return $total;
+    });
+}
+
+
+/**
+ * @param array{elapsedMs: float, peakDeltaMb: float, total: int} $result
+ */
+function assertExpectedTotal(array $result, int $expectedTotal, string $parserName): void
+{
+    if ($result['total'] !== $expectedTotal) {
+        throw new RuntimeException(sprintf(
+            '%s produced invalid total: expected %d, got %d.',
+            $parserName,
+            $expectedTotal,
+            $result['total'],
+        ));
     }
-
-    return [
-        'elapsedMs' => (hrtime(true) - $timeStart) / 1_000_000,
-        'peakDeltaMb' => max(0, (memory_get_peak_usage(false) - $memStart) / 1024 / 1024),
-        'total' => $total,
-    ];
 }
 
 /**
@@ -154,38 +379,116 @@ function medianMetric(array $results, string $key): float
 
     return $values[(int) floor(count($values) / 2)];
 }
+/**
+ * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
+ */
+function measureCrocodile2uJsonStreamer(string $filePath): array
+{
+    return measureExecution(static function () use ($filePath): int {
+        $handle = fopen($filePath, 'rb');
+        if ($handle === false) {
+            throw new RuntimeException(sprintf('Unable to open benchmark file "%s".', $filePath));
+        }
+
+        try {
+            // crocodile2u/json-streamer needs a path to the array (empty string for root)
+            $streamer = new JsonStreamer($handle, '');
+            $streamer->setAssoc(true);
+            $total = 0;
+
+            foreach ($streamer as $item) {
+                $total++;
+                /** @phpstan-ignore-next-line */
+                $_ = $item;
+            }
+
+            return $total;
+        } finally {
+            fclose($handle);
+        }
+    });
+}
 
 /**
  * @param array<int, int> $sizes
  */
 function runBenchmark(int $runs, array $sizes): void
 {
-    printf("Synthetic benchmark (median of %d runs)\n\n", $runs);
-    printf("%-8s  %-12s %-10s  %-12s %-10s  %-11s  %-9s  %s\n", 'Records', 'PC time', 'PC mem', 'JM time', 'JM mem', 'Time delta', 'Time %', 'Speed winner');
-    echo str_repeat('-', 100) . "\n";
+    $parsers = [
+        'PhpJsonChunk' => static fn(string $filePath): array => measurePhpJsonChunk($filePath),
+        'JsonMachine' => static fn(string $filePath): array => measureJsonMachine($filePath),
+        'Salsify' => static fn(string $filePath): array => measureSalsify($filePath),
+        'JsonDecodeStream' => static fn(string $filePath): array => measureJsonDecodeStream($filePath),
+        'JsonCollectionParser' => static fn(string $filePath): array => measureJsonCollectionParser($filePath),
+        'Crocodile2uJsonStreamer' => static fn(string $filePath): array => measureCrocodile2uJsonStreamer($filePath),
+    ];
+
+
+
+
+    printf("Synthetic benchmark on a common root-array dataset (median of %d runs)\n\n", $runs);
+    printf("%-8s  %-22s %-12s %-10s\n", 'Records', 'Parser', 'Time', 'Peak mem');
+    echo str_repeat('-', 60) . "\n";
 
     foreach ($sizes as $count) {
         $filePath = buildDatasetFile($count);
 
         try {
-            $pcResults = [];
-            $jmResults = [];
+            $resultsByParser = [
+                'PhpJsonChunk' => [],
+                'JsonMachine' => [],
+                'Salsify' => [],
+                'JsonDecodeStream' => [],
+                'JsonCollectionParser' => [],
+                'Crocodile2uJsonStreamer' => [],
+            ];
 
-            for ($run = 0; $run < $runs; $run++) {
-                $pcResults[] = measurePhpJsonChunk($filePath);
-                $jmResults[] = measureJsonMachine($filePath);
+            // Warm-up each parser once to reduce one-time initialization noise.
+            foreach ($parsers as $parserName => $measure) {
+                $warmup = $measure($filePath);
+                assertExpectedTotal($warmup, $count, $parserName);
             }
 
-            $pcTime = medianMetric($pcResults, 'elapsedMs');
-            $pcMem = medianMetric($pcResults, 'peakDeltaMb');
-            $jmTime = medianMetric($jmResults, 'elapsedMs');
-            $jmMem = medianMetric($jmResults, 'peakDeltaMb');
+            for ($run = 0; $run < $runs; $run++) {
+                $runOrder = array_keys($parsers);
+                shuffle($runOrder);
 
-            $timeDeltaMs = $pcTime - $jmTime;
-            $timeDeltaPct = $jmTime > 0 ? ($timeDeltaMs / $jmTime) * 100 : 0.0;
-            $winner = $timeDeltaMs <= 0 ? 'PhpJsonChunk' : 'JsonMachine';
+                foreach ($runOrder as $parserName) {
+                    $result = $parsers[$parserName]($filePath);
+                    assertExpectedTotal($result, $count, $parserName);
+                    $resultsByParser[$parserName][] = $result;
+                }
+            }
 
-            printf("%-8d  %8.1f ms %6.2f MB  %8.1f ms %6.2f MB  %+9.1f ms  %+7.1f%%  %s\n", $count, $pcTime, $pcMem, $jmTime, $jmMem, $timeDeltaMs, $timeDeltaPct, $winner);
+            $mediansByParser = [];
+
+            foreach (array_keys($parsers) as $parserName) {
+                $mediansByParser[$parserName] = [
+                    'elapsedMs' => medianMetric($resultsByParser[$parserName], 'elapsedMs'),
+                    'peakDeltaMb' => medianMetric($resultsByParser[$parserName], 'peakDeltaMb'),
+                ];
+            }
+
+            $winner = array_key_first($mediansByParser);
+            foreach ($mediansByParser as $parserName => $metrics) {
+                if ($metrics['elapsedMs'] < $mediansByParser[$winner]['elapsedMs']) {
+                    $winner = $parserName;
+                }
+            }
+
+            $firstRow = true;
+            foreach ($mediansByParser as $parserName => $metrics) {
+                printf(
+                    "%-8s  %-22s %8.1f ms %6.2f MB\n",
+                    $firstRow ? (string) $count : '',
+                    $parserName,
+                    $metrics['elapsedMs'],
+                    $metrics['peakDeltaMb'],
+                );
+                $firstRow = false;
+            }
+
+            printf("%-8s  %-22s %s\n\n", '', 'Winner', $winner);
         } finally {
             if (is_file($filePath)) {
                 unlink($filePath);
@@ -193,7 +496,9 @@ function runBenchmark(int $runs, array $sizes): void
         }
     }
 
-    echo "\nLegend: Delta = PhpJsonChunk - JSON Machine (negative = PhpJsonChunk is faster)\n";
+    echo "Notes:\n";
+    echo "- All parsers read the same generated root-array JSON file and iterate items incrementally.\n";
+    echo "- Benchmark results depend on hardware, PHP version, and OS. Prefer median values from multiple runs.\n";
 }
 
 $options = parseOptions(array_slice($_SERVER['argv'], 1));

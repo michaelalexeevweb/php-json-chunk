@@ -31,22 +31,43 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 | Approach | Memory usage | Streaming | Speed (100k records) |
 |---|---|---|---|
 | `json_decode()` | ❌ High | ❌ | — |
-| `JSON Machine` | ✅ Low | ✅ | 332 ms |
-| `PhpJsonChunk` | ✅ **Lower** | ✅ | **207 ms** ⚡ |
+| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | ✅ **Low** | ✅ | **190.3 ms** ⚡ |
+| [`JsonMachine`](https://github.com/halaxa/json-machine) | ✅ Low | ✅ | 330.0 ms |
+| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | ✅ **Minimal** | ✅ | 383.2 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | ✅ Low | ✅ | 980.2 ms |
+| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | ✅ Low | ✅ | 1025.8 ms |
+| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | ✅ Low | ✅ | 2585.6 ms |
 
-> **PhpJsonChunk is ~40% faster than JSON Machine and uses 50% less memory** on large JSON datasets.
+> Based on the benchmark below (median of 3 runs), `PhpJsonChunk` is the fastest incremental array reader in this comparison.
 
 ## Performance
 
-Synthetic benchmark (median of 3 runs, generated dataset with 100,000 records):
+Quick snapshot for `100000` records (sorted by speed, faster -> slower):
 
 ```
-Records   PC time      PC mem      JM time      JM mem      Time delta   Time %     Speed winner
-10000       19.7 ms    0.15 MB      34.0 ms    0.32 MB      -14.3 ms    -42.0%     PhpJsonChunk
-30000       57.5 ms    0.15 MB     100.4 ms    0.32 MB      -42.9 ms    -42.7%     PhpJsonChunk
-50000       97.1 ms    0.15 MB     166.6 ms    0.32 MB      -69.5 ms    -41.7%     PhpJsonChunk
-100000     191.6 ms    0.15 MB     331.9 ms    0.31 MB     -140.3 ms    -42.3%     PhpJsonChunk
+Rank  Parser                     Time         Peak mem
+1     PhpJsonChunk               190.3 ms     0.15 MB
+2     JsonMachine                330.0 ms     0.31 MB
+3     Crocodile2uJsonStreamer    383.2 ms     0.01 MB
+4     Salsify                    980.2 ms     0.04 MB
+5     JsonCollectionParser      1025.8 ms     0.04 MB
+6     JsonDecodeStream          2585.6 ms     0.04 MB
 ```
+
+Repositories:
+
+- [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk)
+- [`JsonMachine`](https://github.com/halaxa/json-machine)
+- [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer)
+- [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser)
+- [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser)
+- [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream)
+
+Full benchmark matrix: [`BENCHMARKS.md`](BENCHMARKS.md)
+
+Notes:
+
+- The other libraries above are compared on the same generated root-array file and iterate items incrementally.
 
 How to reproduce:
 
