@@ -93,7 +93,7 @@ php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.1.1
+composer require michaelalexeevweb/php-json-chunk:^1.1.2
 ```
 
 ## Quick start
@@ -144,12 +144,23 @@ foreach ($items as $chunk) {
 }
 ```
 
+Use `*` in `keyPath` to traverse all array items at that level:
+
+```php
+$items = $reader->readGenerator(
+    filePath: __DIR__ . '/payload.json',
+    chunkSize: 500,
+    keyPath: 'key1.*.key2.*.key3',
+);
+```
+
 ## What it reads
 
 `PhpJsonChunk` is designed for **JSON array lists**:
 
 - a root array like `[{"id":1},{"id":2}]`
 - or a nested array resolved by `keyPath`, like `data.0.items`
+- wildcard traversal is supported via `*`, for example `key1.*.key2.*.key3`
 
 If the root JSON value is an object, you should point `keyPath` to a nested array list.
 
@@ -466,6 +477,29 @@ $iteratorNested = $reader->readIterator(
 );
 foreach ($iteratorNested as $item) {
     var_dump($item);
+}
+
+// Wildcard traversal — iterate all items at a given array level using "*"
+// JSON: {"key1":[{"key2":[{"key3":[1,2]},{"key3":[3,4]}]},{"key2":[{"key3":[5]}]}]}
+// keyPath "key1.*.key2.*.key3" will collect all key3 arrays and stream their items
+$wildcardGenerator = $reader->readGenerator(
+    filePath: $filePath,
+    keyPath: 'key1.*.key2.*.key3',
+);
+foreach ($wildcardGenerator as $item) {
+    var_dump($item); // yields items from every matched key3 array
+}
+
+// Wildcard on scalar field — stream a flat value from every array element
+// JSON: {"data":[{"name":"Alice"},{"name":"Bob"}]}
+// keyPath "data.*.name" yields "Alice", "Bob"
+$names = $reader->readGenerator(
+    filePath: $filePath,
+    limit: 10,
+    keyPath: 'data.*.name',
+);
+foreach ($names as $name) {
+    echo $name . PHP_EOL;
 }
 ```
 

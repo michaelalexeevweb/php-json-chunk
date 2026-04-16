@@ -40,6 +40,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     public function count(string $filePath, string|null $keyPath = null): int
     {
+        if ($keyPath !== null && $keyPath !== '' && $this->hasWildcardSegment($keyPath)) {
+            return $this->countForWildcardKeyPath($filePath, $keyPath);
+        }
+
         $handle = $this->openFile($filePath);
         $this->resetReadState();
 
@@ -151,6 +155,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     ): Generator {
         $this->assertChunkSize($chunkSize);
         $this->assertLimitAndOffset($limit, $offset);
+
+        if ($keyPath !== null && $keyPath !== '' && $this->hasWildcardSegment($keyPath)) {
+            yield from $this->readGeneratorWithWildcardKeyPath($filePath, $chunkSize, $limit, $offset, $keyPath);
+
+            return;
+        }
 
         $handle = $this->openFile($filePath);
         $this->resetReadState();
@@ -305,13 +315,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if ($keyPath !== null && $keyPath !== '') {
-            $segments = explode('.', $keyPath);
-
-            foreach ($segments as $segment) {
-                if ($segment === '') {
-                    throw new InvalidArgumentException('Key path must not contain empty segments.');
-                }
-            }
+            $segments = $this->splitAndValidateKeyPath($keyPath);
 
             $resolved = $this->seekPath($handle, $first, $segments, 0, $keyPath);
 
@@ -766,6 +770,202 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         $segment = $segments[$depth];
         throw new RuntimeException(sprintf('Key path "%s" was not found at segment "%s".', $keyPath, $segment));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function splitAndValidateKeyPath(string $keyPath): array
+    {
+        $segments = explode('.', $keyPath);
+
+        foreach ($segments as $segment) {
+            if ($segment === '') {
+                throw new InvalidArgumentException('Key path must not contain empty segments.');
+            }
+        }
+
+        return $segments;
+    }
+
+    private function hasWildcardSegment(string $keyPath): bool
+    {
+        return in_array('*', $this->splitAndValidateKeyPath($keyPath), true);
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function countForWildcardKeyPath(string $filePath, string $keyPath): int
+    {
+        return count($this->resolveWildcardValues($filePath, $keyPath));
+    }
+
+    /**
+     * @return Generator<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function readGeneratorWithWildcardKeyPath(
+        string $filePath,
+        int|null $chunkSize,
+        int|null $limit,
+        int $offset,
+        string $keyPath,
+    ): Generator {
+        $values = $this->resolveWildcardValues($filePath, $keyPath);
+        $processed = 0;
+        $taken = 0;
+        $currentChunk = [];
+
+        foreach ($values as $value) {
+            if ($processed < $offset) {
+                $processed++;
+                continue;
+            }
+
+            if ($limit !== null && $taken >= $limit) {
+                break;
+            }
+
+            if ($chunkSize === null) {
+                yield $value;
+            } else {
+                $currentChunk[] = $value;
+
+                if (count($currentChunk) >= $chunkSize) {
+                    yield $currentChunk;
+                    $currentChunk = [];
+                }
+            }
+
+            $processed++;
+            $taken++;
+        }
+
+        if ($chunkSize !== null && $currentChunk !== []) {
+            yield $currentChunk;
+        }
+    }
+
+    /**
+     * @return array<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function resolveWildcardValues(string $filePath, string $keyPath): array
+    {
+        $json = $this->decodeJsonFile($filePath);
+        $segments = $this->splitAndValidateKeyPath($keyPath);
+        $resolvedNodes = $this->resolveKeyPathNodes($json, $segments, 0);
+
+        if ($resolvedNodes === []) {
+            throw new RuntimeException(sprintf('Key path "%s" was not found.', $keyPath));
+        }
+
+        $values = [];
+
+        foreach ($resolvedNodes as $node) {
+            if (is_array($node) && array_is_list($node)) {
+                foreach ($node as $item) {
+                    $values[] = $item;
+                }
+
+                continue;
+            }
+
+            $values[] = $node;
+        }
+
+        return $values;
+    }
+
+    /**
+     * @return array<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function decodeJsonFile(string $filePath): array
+    {
+        $content = file_get_contents($filePath);
+        if ($content === false) {
+            throw new InvalidArgumentException(sprintf('Invalid JSON in file "%s": unable to read file.', $filePath));
+        }
+
+        try {
+            $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new InvalidArgumentException(
+                sprintf('Invalid JSON in file "%s": %s', $filePath, $exception->getMessage()),
+                0,
+                $exception,
+            );
+        }
+
+        if (!is_array($decoded)) {
+            throw new InvalidArgumentException(
+                sprintf('Invalid JSON in file "%s": root value must be object or array.', $filePath),
+            );
+        }
+
+        return $decoded;
+    }
+
+    /**
+     * @param array<int, string> $segments
+     *
+     * @return array<int, mixed>
+     */
+    private function resolveKeyPathNodes(mixed $node, array $segments, int $depth): array
+    {
+        if ($depth >= count($segments)) {
+            return [$node];
+        }
+
+        if (!is_array($node)) {
+            return [];
+        }
+
+        $segment = $segments[$depth];
+
+        if ($segment === '*') {
+            if (!array_is_list($node)) {
+                return [];
+            }
+
+            $resolved = [];
+
+            foreach ($node as $item) {
+                foreach ($this->resolveKeyPathNodes($item, $segments, $depth + 1) as $matchedNode) {
+                    $resolved[] = $matchedNode;
+                }
+            }
+
+            return $resolved;
+        }
+
+        if (array_is_list($node)) {
+            if (!ctype_digit($segment)) {
+                return [];
+            }
+
+            $index = (int)$segment;
+
+            if (!array_key_exists($index, $node)) {
+                return [];
+            }
+
+            return $this->resolveKeyPathNodes($node[$index], $segments, $depth + 1);
+        }
+
+        if (!array_key_exists($segment, $node)) {
+            return [];
+        }
+
+        return $this->resolveKeyPathNodes($node[$segment], $segments, $depth + 1);
     }
 
     /**
@@ -1252,11 +1452,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     public function getFirst(string $filePath, string|null $keyPath = null): mixed
     {
-        foreach ($this->readGenerator(
-            filePath: $filePath,
-            limit: 1,
-            keyPath: $keyPath
-        ) as $item) {
+        foreach (
+            $this->readGenerator(
+                filePath: $filePath,
+                limit: 1,
+                keyPath: $keyPath,
+            ) as $item
+        ) {
             return $item;
         }
 
@@ -1272,10 +1474,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $last = null;
         $found = false;
 
-        foreach ($this->readGenerator(
-            filePath: $filePath,
-            keyPath: $keyPath
-        ) as $item) {
+        foreach (
+            $this->readGenerator(
+                filePath: $filePath,
+                keyPath: $keyPath,
+            ) as $item
+        ) {
             $last = $item;
             $found = true;
         }
@@ -1297,12 +1501,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new InvalidArgumentException('Index must be greater than or equal to 0.');
         }
 
-        foreach ($this->readGenerator(
-            filePath: $filePath,
-            limit: 1,
-            offset: $index,
-            keyPath: $keyPath
-        ) as $item) {
+        foreach (
+            $this->readGenerator(
+                filePath: $filePath,
+                limit: 1,
+                offset: $index,
+                keyPath: $keyPath,
+            ) as $item
+        ) {
             return $item;
         }
 

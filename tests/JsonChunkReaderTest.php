@@ -107,6 +107,46 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         );
     }
 
+    public function testReadSupportsWildcardKeyPathTraversal(): void
+    {
+        $result = $this->reader->read(
+            __DIR__ . '/fixtures/nested-wildcard.json',
+            null,
+            null,
+            0,
+            'key1.*.key2.*.key3',
+        );
+
+        self::assertSame(
+            [[
+                ['id' => 1],
+                ['id' => 2],
+                ['id' => 3],
+                ['id' => 4],
+                ['id' => 5],
+                ['id' => 6],
+            ]],
+            $result,
+        );
+    }
+
+    public function testReadSupportsWildcardKeyPathWithOffsetAndLimit(): void
+    {
+        $result = $this->reader->read(
+            __DIR__ . '/fixtures/nested-wildcard.json',
+            null,
+            3,
+            2,
+            'key1.*.key2.*.key3',
+        );
+
+        self::assertSame([[
+            ['id' => 3],
+            ['id' => 4],
+            ['id' => 5],
+        ]], $result);
+    }
+
     public function testReadSupportsTemporaryChunkDirectory(): void
     {
         $tempChunkDir = sys_get_temp_dir() . '/php_json_chunk_' . uniqid(more_entropy: true);
@@ -383,6 +423,27 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
             0,
             'key1.key2.key3',
         );
+    }
+
+    public function testReadThrowsRuntimeExceptionWhenWildcardPathIsNotFound(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('was not found');
+
+        $this->reader->read(
+            __DIR__ . '/fixtures/nested-wildcard.json',
+            null,
+            null,
+            0,
+            'key1.*.missing.*.key3',
+        );
+    }
+
+    public function testCountReturnsTotalForWildcardKeyPath(): void
+    {
+        $count = $this->reader->count(__DIR__ . '/fixtures/nested-wildcard.json', 'key1.*.key2.*.key3');
+
+        self::assertSame(6, $count);
     }
 
     public function testGetFirstReturnsFirstItemForRootArray(): void
