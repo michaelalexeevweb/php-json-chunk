@@ -67,4 +67,44 @@ interface JsonChunkReaderInterface
         string|null $keyPath = null,
         string|null $tempChunkDir = null,
     ): Generator;
+
+    /**
+     * Returns the first element of the target JSON array.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getFirst(string $filePath, string|null $keyPath = null): mixed;
+
+    /**
+     * Returns the last element of the target JSON array.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getLast(string $filePath, string|null $keyPath = null): mixed;
+
+    /**
+     * Returns the Nth element (0-based index) of the target JSON array.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getNth(string $filePath, int $index, string|null $keyPath = null): mixed;
+
+    /**
+     * Executes a callback for each element in the target JSON array.
+     *
+     * @param callable(mixed): void $callback
+     *
+     * @return int Total number of elements processed
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function forEach(
+        string $filePath,
+        callable $callback,
+        string|null $keyPath = null,
+    ): int;
 }

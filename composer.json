@@ -21,7 +21,8 @@
     "require-dev": {
         "phpunit/phpunit": "^10.5",
         "phpstan/phpstan": "^2.1",
-        "ergebnis/phpstan-rules": "^2.13"
+        "ergebnis/phpstan-rules": "^2.13",
+        "halaxa/json-machine": "^1.2"
     },
     "autoload": {
         "psr-4": {
@@ -36,7 +37,8 @@
     "scripts": {
         "test": "phpunit --exclude-group performance",
         "test:performance": "phpunit --group performance",
-        "benchmark": "php bin/performance.php",
+        "benchmark": "php bin/benchmark.php",
+        "compare": "php bin/benchmark.php",
         "phpstan": "phpstan analyse --configuration=phpstan.neon.dist --memory-limit=1G"
     },
     "minimum-stability": "stable",

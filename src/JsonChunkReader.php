@@ -15,10 +15,24 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 {
     private const DEFAULT_TEMP_CHUNK_SIZE = 1000;
 
+    /** Size of each fread() block in bytes. */
+    private const BLOCK_SIZE = 65536;
+
     /**
+     * One-char look-ahead stack (used only by seekPath methods).
+     *
      * @var array<int, string>
      */
     private array $charBuffer = [];
+
+    /** Current read block content. */
+    private string $buf = '';
+
+    /** Next unread byte position inside $buf. */
+    private int $bufPos = 0;
+
+    /** Number of valid bytes in $buf. */
+    private int $bufLen = 0;
 
     /**
      * @throws InvalidArgumentException
@@ -27,7 +41,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     public function count(string $filePath, string|null $keyPath = null): int
     {
         $handle = $this->openFile($filePath);
-        $this->charBuffer = [];
+        $this->resetReadState();
 
         try {
             $this->positionStreamAtTargetArrayStart($handle, $keyPath);
@@ -35,7 +49,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return $this->countArrayValues($handle, $filePath);
         } finally {
             fclose($handle);
-            $this->charBuffer = [];
+            $this->resetReadState();
         }
     }
 
@@ -105,7 +119,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $this->assertLimitAndOffset($limit, $offset);
 
         if ($tempChunkDir !== null && $tempChunkDir !== '') {
-            $chunkFiles = $this->createTemporaryChunkFiles($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir);
+            $chunkFiles = $this->createTemporaryChunkFiles(
+                filePath: $filePath,
+                chunkSize: $chunkSize,
+                limit: $limit,
+                offset: $offset,
+                keyPath: $keyPath,
+                tempChunkDir: $tempChunkDir,
+            );
 
             yield from $this->yieldFromTemporaryChunks($chunkFiles, $chunkSize === null);
 
@@ -132,7 +153,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $this->assertLimitAndOffset($limit, $offset);
 
         $handle = $this->openFile($filePath);
-        $this->charBuffer = [];
+        $this->resetReadState();
 
         try {
             $this->positionStreamAtTargetArrayStart($handle, $keyPath);
@@ -171,7 +192,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
         } finally {
             fclose($handle);
-            $this->charBuffer = [];
+            $this->resetReadState();
         }
     }
 
@@ -194,7 +215,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $chunkFiles = [];
 
         try {
-            foreach ($this->readGeneratorWithoutTemporaryChunks($filePath, $streamChunkSize, $limit, $offset, $keyPath) as $chunk) {
+            foreach (
+                $this->readGeneratorWithoutTemporaryChunks(
+                    filePath: $filePath,
+                    chunkSize: $streamChunkSize,
+                    limit: $limit,
+                    offset: $offset,
+                    keyPath: $keyPath,
+                ) as $chunk
+            ) {
                 if (!is_array($chunk)) {
                     throw new RuntimeException('Temporary chunk serialization expects an array chunk.');
                 }
@@ -330,7 +359,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            $rawValue = $this->readValueAsJson($handle, $valueFirst, $filePath);
+            // Hot path: use block-buffer scanners (strcspn at C level) instead of
+            // per-character readValueAsJson + string concatenation.
+            $rawValue = $this->scanValue($handle, $valueFirst, $filePath);
 
             try {
                 yield json_decode($rawValue, true, 512, JSON_THROW_ON_ERROR);
@@ -356,10 +387,195 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
     }
 
+    // ─── block-buffer scanners (hot path) ────────────────────────────────────
+
+    /**
+     * Refills the internal buffer from the handle.
+     *
+     * @param resource $handle
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function refillBuffer($handle, string|null $filePath = null, string $detail = ''): void
+    {
+        $chunk = fread($handle, self::BLOCK_SIZE);
+
+        if ($chunk === false || $chunk === '') {
+            throw new InvalidArgumentException(
+                $this->invalidJsonMessage($filePath, $detail ?: 'unexpected end of input.'),
+            );
+        }
+
+        $this->buf = $chunk;
+        $this->bufLen = strlen($chunk);
+        $this->bufPos = 0;
+    }
+
+    /**
+     * Dispatches to the correct scanner based on the first character.
+     *
+     * Returns the raw JSON bytes of the value (ready for json_decode).
+     *
+     * @param resource $handle
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function scanValue($handle, string $firstChar, string $filePath): string
+    {
+        if ($firstChar === '"') {
+            return '"' . $this->scanStringRemainder($handle, $filePath);
+        }
+
+        if ($firstChar === '{' || $firstChar === '[') {
+            return $this->scanNested($handle, $firstChar, $filePath);
+        }
+
+        return $this->scanPrimitive($handle, $firstChar);
+    }
+
+    /**
+     * Scans the body of a JSON string from the byte AFTER the opening `"` until the
+     * matching closing `"` (inclusive).  Uses strcspn() to skip plain bytes in bulk.
+     *
+     * @param resource $handle
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function scanStringRemainder($handle, string $filePath): string
+    {
+        $result = '';
+
+        while (true) {
+            // Refill block buffer if needed.
+            if ($this->bufPos >= $this->bufLen) {
+                $this->refillBuffer($handle, $filePath, 'unexpected end of input in string.');
+            }
+
+            // Find the next `\` or `"` in the current block (C-level scan).
+            $spanLen = strcspn($this->buf, '\\"', $this->bufPos);
+            $segEnd = $this->bufPos + $spanLen;
+
+            if ($segEnd >= $this->bufLen) {
+                // No special char before end of block — consume all remaining bytes.
+                $result .= substr($this->buf, $this->bufPos);
+                $this->bufPos = $this->bufLen;
+                continue;
+            }
+
+            $special = $this->buf[$segEnd];
+            $result .= substr($this->buf, $this->bufPos, $spanLen + 1); // include special char
+            $this->bufPos = $segEnd + 1;
+
+            if ($special === '"') {
+                return $result; // closing quote found
+            }
+
+            // Escape sequence (`\`): consume one more byte (the escaped character).
+            if ($this->bufPos >= $this->bufLen) {
+                $this->refillBuffer($handle, $filePath, 'unexpected end of input in string.');
+            }
+
+            $result .= $this->buf[$this->bufPos];
+            $this->bufPos++;
+        }
+    }
+
+    /**
+     * Scans a JSON object `{…}` or array `[…]` from the opening bracket until the
+     * balanced closing bracket.  Uses strcspn() to skip non-structural bytes in bulk.
+     *
+     * @param resource $handle
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function scanNested($handle, string $firstChar, string $filePath): string
+    {
+        $result = $firstChar;
+        $depth = 1;
+
+        while ($depth > 0) {
+            if ($this->bufPos >= $this->bufLen) {
+                $this->refillBuffer($handle, $filePath, 'unexpected end of input.');
+            }
+
+            // Find next structural byte: `{`, `}`, `[`, `]`, or `"`.
+            $spanLen = strcspn($this->buf, '{}[]"', $this->bufPos);
+            $segEnd = $this->bufPos + $spanLen;
+
+            if ($segEnd >= $this->bufLen) {
+                $result .= substr($this->buf, $this->bufPos);
+                $this->bufPos = $this->bufLen;
+                continue;
+            }
+
+            $struct = $this->buf[$segEnd];
+            $result .= substr($this->buf, $this->bufPos, $spanLen + 1);
+            $this->bufPos = $segEnd + 1;
+
+            if ($struct === '"') {
+                // Scan string body so that `{`, `}`, `[`, `]` inside strings are skipped.
+                $result .= $this->scanStringRemainder($handle, $filePath);
+            } elseif ($struct === '{' || $struct === '[') {
+                $depth++;
+            } else { // `}` or `]`
+                $depth--;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Scans a JSON primitive (number / boolean / null) from `$firstChar` until a
+     * delimiter byte is found.  The delimiter is left in the buffer (not consumed).
+     *
+     * @param resource $handle
+     */
+    private function scanPrimitive($handle, string $firstChar): string
+    {
+        $result = $firstChar;
+
+        while (true) {
+            if ($this->bufPos >= $this->bufLen) {
+                $chunk = fread($handle, self::BLOCK_SIZE);
+
+                if (!is_string($chunk) || $chunk === '') {
+                    break; // EOF or error — valid for the very last value in a file
+                }
+
+                $this->buf = $chunk;
+                $this->bufLen = strlen($chunk);
+                $this->bufPos = 0;
+            }
+
+            $spanLen = strcspn($this->buf, ",]} \t\n\r", $this->bufPos);
+            $segEnd = $this->bufPos + $spanLen;
+
+            if ($segEnd >= $this->bufLen) {
+                $result .= substr($this->buf, $this->bufPos);
+                $this->bufPos = $this->bufLen;
+                continue;
+            }
+
+            $result .= substr($this->buf, $this->bufPos, $spanLen);
+            $this->bufPos = $segEnd; // leave delimiter in buffer (not consumed)
+            break;
+        }
+
+        return $result;
+    }
+
+    // ─── end block-buffer scanners ────────────────────────────────────────────
+
     /**
      * @param resource $handle
      *
      * @throws InvalidArgumentException
+     * @throws RuntimeException
      */
     private function countArrayValues($handle, string $filePath): int
     {
@@ -369,7 +585,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if ($next === null) {
-            throw new InvalidArgumentException(sprintf('Invalid JSON in file "%s": unexpected end of input in array.', $filePath));
+            throw new InvalidArgumentException(
+                sprintf('Invalid JSON in file "%s": unexpected end of input in array.', $filePath),
+            );
         }
 
         $this->unreadChar($next);
@@ -379,7 +597,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         while (true) {
             $valueFirst = $this->readNonWhitespaceChar($handle);
             if ($valueFirst === null) {
-                throw new InvalidArgumentException(sprintf('Invalid JSON in file "%s": unexpected end of input in array value.', $filePath));
+                throw new InvalidArgumentException(
+                    sprintf('Invalid JSON in file "%s": unexpected end of input in array value.', $filePath),
+                );
             }
 
             $this->skipValue($handle, $valueFirst, $filePath);
@@ -391,7 +611,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             if ($delimiter !== ',') {
-                throw new InvalidArgumentException(sprintf('Invalid JSON in file "%s": expected "," or "]" in array.', $filePath));
+                throw new InvalidArgumentException(
+                    sprintf('Invalid JSON in file "%s": expected "," or "]" in array.', $filePath),
+                );
             }
         }
 
@@ -843,15 +1065,36 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function readNonWhitespaceChar($handle): string|null
     {
+        // Drain any look-ahead chars first.
+        while ($this->charBuffer !== []) {
+            $c = array_pop($this->charBuffer);
+
+            if (!ctype_space($c)) {
+                return $c;
+            }
+        }
+
+        // Scan the block buffer, skipping whitespace in bulk via strspn (C-level).
         while (true) {
-            $char = $this->readChar($handle);
-            if ($char === null) {
-                return null;
+            if ($this->bufPos >= $this->bufLen) {
+                $chunk = fread($handle, self::BLOCK_SIZE);
+
+                if ($chunk === false || $chunk === '') {
+                    return null;
+                }
+
+                $this->buf = $chunk;
+                $this->bufLen = strlen($chunk);
+                $this->bufPos = 0;
             }
 
-            if (!ctype_space($char)) {
-                return $char;
+            // Skip leading whitespace in one C-level call.
+            $this->bufPos += strspn($this->buf, " \t\n\r", $this->bufPos);
+
+            if ($this->bufPos < $this->bufLen) {
+                return $this->buf[$this->bufPos++];
             }
+            // Buffer was all whitespace — refill and try again.
         }
     }
 
@@ -864,18 +1107,34 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return array_pop($this->charBuffer);
         }
 
-        $char = fgetc($handle);
+        if ($this->bufPos < $this->bufLen) {
+            return $this->buf[$this->bufPos++];
+        }
 
-        if ($char === false) {
+        $chunk = fread($handle, self::BLOCK_SIZE);
+
+        if ($chunk === false || $chunk === '') {
             return null;
         }
 
-        return $char;
+        $this->buf = $chunk;
+        $this->bufPos = 1;
+        $this->bufLen = strlen($this->buf);
+
+        return $this->buf[0];
     }
 
     private function unreadChar(string $char): void
     {
         $this->charBuffer[] = $char;
+    }
+
+    private function resetReadState(): void
+    {
+        $this->charBuffer = [];
+        $this->buf = '';
+        $this->bufPos = 0;
+        $this->bufLen = 0;
     }
 
     private function isJsonDelimiter(string $char): bool
@@ -954,7 +1213,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if (!is_array($decodedChunk) || !array_is_list($decodedChunk)) {
-            throw new RuntimeException(sprintf('Temporary chunk file "%s" must contain a JSON array list.', $chunkFile));
+            throw new RuntimeException(
+                sprintf('Temporary chunk file "%s" must contain a JSON array list.', $chunkFile),
+            );
         }
 
         return $decodedChunk;
@@ -983,5 +1244,94 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         if ($chunkSize !== null && $chunkSize <= 0) {
             throw new InvalidArgumentException('Chunk size must be greater than 0.');
         }
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getFirst(string $filePath, string|null $keyPath = null): mixed
+    {
+        foreach ($this->readGenerator(
+            filePath: $filePath,
+            limit: 1,
+            keyPath: $keyPath
+        ) as $item) {
+            return $item;
+        }
+
+        throw new RuntimeException(sprintf('Target array in "%s" is empty.', $filePath));
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getLast(string $filePath, string|null $keyPath = null): mixed
+    {
+        $last = null;
+        $found = false;
+
+        foreach ($this->readGenerator(
+            filePath: $filePath,
+            keyPath: $keyPath
+        ) as $item) {
+            $last = $item;
+            $found = true;
+        }
+
+        if (!$found) {
+            throw new RuntimeException(sprintf('Target array in "%s" is empty.', $filePath));
+        }
+
+        return $last;
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getNth(string $filePath, int $index, string|null $keyPath = null): mixed
+    {
+        if ($index < 0) {
+            throw new InvalidArgumentException('Index must be greater than or equal to 0.');
+        }
+
+        foreach ($this->readGenerator(
+            filePath: $filePath,
+            limit: 1,
+            offset: $index,
+            keyPath: $keyPath
+        ) as $item) {
+            return $item;
+        }
+
+        throw new RuntimeException(sprintf('Index %d not found in target array of "%s".', $index, $filePath));
+    }
+
+    /**
+     * @param callable(mixed): void $callback
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function forEach(
+        string $filePath,
+        callable $callback,
+        string|null $keyPath = null,
+    ): int {
+        $count = 0;
+
+        foreach (
+            $this->readGenerator(
+                filePath: $filePath,
+                keyPath: $keyPath,
+            ) as $item
+        ) {
+            $callback($item);
+            $count++;
+        }
+
+        return $count;
     }
 }

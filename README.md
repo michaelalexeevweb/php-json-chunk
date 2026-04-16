@@ -3,7 +3,7 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/michaelalexeevweb/php-json-chunk/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelalexeevweb/php-json-chunk/actions/workflows/ci.yml)
 
-Memory-efficient JSON streaming for large files in PHP. Read large JSON arrays from files in chunks, iterators, or generators without loading the full file into memory.
+Memory-efficient **and fast** JSON streaming for large files in PHP. Read large JSON arrays from files in chunks, iterators, or generators without loading the full file into memory — **40% faster than JSON Machine**.
 
 Process large JSON files without running out of memory.
 
@@ -28,18 +28,48 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 
 ## Comparison
 
-| Library | Memory usage | Streaming |
-|---|---|---|
-| `json_decode()` | ❌ High | ❌ |
-| `JSON Machine` | ✅ Low | ✅ |
-| `PhpJsonChunk` | ✅ Low | ✅ |
+| Approach | Memory usage | Streaming | Speed (100k records) |
+|---|---|---|---|
+| `json_decode()` | ❌ High | ❌ | — |
+| `JSON Machine` | ✅ Low | ✅ | 332 ms |
+| `PhpJsonChunk` | ✅ **Lower** | ✅ | **207 ms** ⚡ |
 
-> High-level comparison for typical large-file workflows.
+> **PhpJsonChunk is ~40% faster than JSON Machine and uses 50% less memory** on large JSON datasets.
+
+## Performance
+
+Synthetic benchmark (median of 3 runs, generated dataset with 100,000 records):
+
+```
+Records   PC time      PC mem      JM time      JM mem      Time delta   Time %     Speed winner
+10000       19.7 ms    0.15 MB      34.0 ms    0.32 MB      -14.3 ms    -42.0%     PhpJsonChunk
+30000       57.5 ms    0.15 MB     100.4 ms    0.32 MB      -42.9 ms    -42.7%     PhpJsonChunk
+50000       97.1 ms    0.15 MB     166.6 ms    0.32 MB      -69.5 ms    -41.7%     PhpJsonChunk
+100000     191.6 ms    0.15 MB     331.9 ms    0.31 MB     -140.3 ms    -42.3%     PhpJsonChunk
+```
+
+How to reproduce:
+
+```bash
+composer benchmark
+```
+
+This runs `bin/benchmark.php` and generates benchmark JSON data on the fly.
+
+You can also run with custom parameters:
+
+```bash
+php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
+```
+
+> Benchmark results depend on hardware, PHP version, and OS. Prefer median values from multiple runs.
 
 ## Install
 
+**Requirements:** PHP 8.1+
+
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.0.5
+composer require michaelalexeevweb/php-json-chunk:^1.1.0
 ```
 
 ## Quick start
@@ -193,6 +223,83 @@ $generator = $reader->readGenerator(
 foreach ($generator as $chunk) {
     var_dump($chunk);
 }
+```
+
+## Convenience Methods
+
+### `getFirst()`
+
+Returns the first element in the target JSON array.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use PhpJsonChunk\JsonChunkReader;
+
+$reader = new JsonChunkReader();
+
+$first = $reader->getFirst(__DIR__ . '/data.json', keyPath: 'data');
+var_dump($first);
+```
+
+### `getLast()`
+
+Returns the last element in the target JSON array.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use PhpJsonChunk\JsonChunkReader;
+
+$reader = new JsonChunkReader();
+
+$last = $reader->getLast(__DIR__ . '/data.json', keyPath: 'data');
+var_dump($last);
+```
+
+### `getNth()`
+
+Returns the element at a specific 0-based index.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use PhpJsonChunk\JsonChunkReader;
+
+$reader = new JsonChunkReader();
+
+$tenth = $reader->getNth(__DIR__ . '/data.json', index: 10, keyPath: 'data');
+var_dump($tenth);
+```
+
+### `forEach()`
+
+Iterates through all elements and executes a callback for each one. Returns the total count processed.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use PhpJsonChunk\JsonChunkReader;
+
+$reader = new JsonChunkReader();
+
+$total = $reader->forEach(
+    __DIR__ . '/data.json',
+    callback: function ($item) {
+        echo $item['name'] . "\n";
+    },
+    keyPath: 'data',
+);
+
+echo "Processed $total records\n";
 ```
 
 ## Common options

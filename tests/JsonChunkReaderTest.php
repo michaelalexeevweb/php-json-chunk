@@ -385,6 +385,112 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         );
     }
 
+    public function testGetFirstReturnsFirstItemForRootArray(): void
+    {
+        $item = $this->reader->getFirst(__DIR__ . '/fixtures/sample-array.json');
+
+        self::assertSame(['id' => 1], $item);
+    }
+
+    public function testGetFirstReturnsFirstItemForNestedKeyPath(): void
+    {
+        $item = $this->reader->getFirst(__DIR__ . '/fixtures/nested.json', 'key1.0.key2.0.key3');
+
+        self::assertSame(['id' => 1], $item);
+    }
+
+    public function testGetLastReturnsLastItemForRootArray(): void
+    {
+        $item = $this->reader->getLast(__DIR__ . '/fixtures/sample-array.json');
+
+        self::assertSame(['id' => 3], $item);
+    }
+
+    public function testGetLastThrowsWhenTargetArrayIsEmpty(): void
+    {
+        $filePath = $this->createTempJsonFile('[]');
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('is empty');
+
+            $this->reader->getLast($filePath);
+        } finally {
+            $this->removeFileIfExists($filePath);
+        }
+    }
+
+    public function testGetNthReturnsItemByIndex(): void
+    {
+        $item = $this->reader->getNth(__DIR__ . '/fixtures/sample-array.json', 1);
+
+        self::assertSame(['id' => 2], $item);
+    }
+
+    public function testGetNthThrowsWhenIndexIsNegative(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Index must be greater than or equal to 0.');
+
+        $this->reader->getNth(__DIR__ . '/fixtures/sample-array.json', -1);
+    }
+
+    public function testGetNthThrowsWhenIndexIsOutOfRange(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Index 99 not found');
+
+        $this->reader->getNth(__DIR__ . '/fixtures/sample-array.json', 99);
+    }
+
+    public function testForEachProcessesAllItemsAndReturnsCount(): void
+    {
+        $collected = [];
+
+        $count = $this->reader->forEach(
+            __DIR__ . '/fixtures/sample-array.json',
+            static function (mixed $item) use (&$collected): void {
+                $collected[] = $item;
+            },
+        );
+
+        self::assertSame(3, $count);
+        self::assertSame([
+            ['id' => 1],
+            ['id' => 2],
+            ['id' => 3],
+        ], $collected);
+    }
+
+    public function testForEachSupportsNestedKeyPath(): void
+    {
+        $ids = [];
+
+        $count = $this->reader->forEach(
+            __DIR__ . '/fixtures/nested.json',
+            static function (mixed $item) use (&$ids): void {
+                $ids[] = $item['id'] ?? null;
+            },
+            'key1.0.key2.0.key3',
+        );
+
+        self::assertSame(3, $count);
+        self::assertSame([1, 2, 3], $ids);
+    }
+
+    public function testForEachBubblesCallbackException(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('stop');
+
+        $this->reader->forEach(
+            __DIR__ . '/fixtures/sample-array.json',
+            static function (): void {
+                throw new RuntimeException('stop');
+            },
+        );
+    }
+
     private function createTempJsonFile(string $content): string
     {
         $path = tempnam(sys_get_temp_dir(), 'json_chunk_');
