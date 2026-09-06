@@ -623,7 +623,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
     public function testWildcardKeyPathTakesANumericSegmentAfterTheWildcard(): void
     {
         $filePath = $this->writeTemporaryJson(
-            '{"d":[{"x":[[10,11],[12]]},{"x":[[13]]},{"x":[]}]}',
+            '{"d":[{"x":[[10,11],[12]]},{"x":[[13],[14]]},{"x":[]}]}',
         );
 
         try {
@@ -636,12 +636,315 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
 
             self::assertSame(3, $this->reader->count($filePath, 'd.*.x.0'));
 
+            // A NON-zero index matters on its own: at index 0 the walk matches on its first pass and
+            // never has to count past it, so the counter that advances through the list is exercised
+            // by nothing. Element 1 of each `x` reaches it.
+            self::assertSame(
+                [12, 14],
+                iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'd.*.x.1'), false),
+            );
+
             // An index past the end of every branch resolves to nothing at all, which is the same
             // answer walking the decoded arrays gave.
             $this->expectException(RuntimeException::class);
             $this->expectExceptionMessage('was not found');
 
             $this->reader->count($filePath, 'd.*.x.9');
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A token that straddles the boundary between two read blocks is still one token.
+     *
+     * The reader works a 64 KB block at a time, and the comparisons that decide when to refill are the
+     * only thing standing between "one string" and "two halves of a string". Nothing here drove that
+     * seam: shrinking the block to seven bytes left the suite green, and so did loosening the refill
+     * comparisons.
+     *
+     * The padding slides a delicate construct — an escaped quote, a bracket inside a string, a
+     * multi-byte character — across the seam one byte at a time, so whichever byte of it lands on the
+     * boundary, the answer must be the one `json_decode()` gives.
+     *
+     * @param string $shape the second item, whose awkward part is pushed onto the seam
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('tokensAcrossTheReadBlockBoundary')]
+    public function testATokenStraddlingTheReadBlockBoundaryIsReadWhole(string $shape): void
+    {
+        $blockSize = 65536;
+
+        // Every offset across the construct, one byte at a time. Stepping in threes was enough to
+        // look thorough and skipped the offset that lands the seam exactly where the primitive scanner
+        // decides whether to refill — the one comparison this was written to pin.
+        for ($padding = $blockSize - 24; $padding <= $blockSize + 4; $padding++) {
+            $json = sprintf('[{"p":"%s"},%s]', str_repeat('x', $padding), $shape);
+            $filePath = $this->writeTemporaryJson($json);
+
+            try {
+                $expected = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+                self::assertIsArray($expected);
+
+                self::assertSame(
+                    $expected,
+                    iterator_to_array($this->reader->readGenerator($filePath), false),
+                    sprintf('the seam fell inside the token at padding %d', $padding),
+                );
+                self::assertSame(2, $this->reader->count($filePath));
+            } finally {
+                @unlink($filePath);
+            }
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function tokensAcrossTheReadBlockBoundary(): array
+    {
+        return [
+            'an escaped quote' => ['{"s":"a\"b]c"}'],
+            'a trailing backslash' => ['{"s":"a\\\\"}'],
+            'a multi-byte character' => ['{"s":"é🐘"}'],
+            'a number with an exponent' => ['-2.5E-2'],
+            'a literal' => ['true'],
+        ];
+    }
+
+    /**
+     * A key path with an empty segment is refused rather than quietly treated as something else.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('keyPathsWithAnEmptySegment')]
+    public function testAKeyPathWithAnEmptySegmentIsRefused(string $keyPath): void
+    {
+        $filePath = $this->writeTemporaryJson('{"a":{"b":[{"id":1}]}}');
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('empty segments');
+
+            $this->reader->read($filePath, keyPath: $keyPath);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function keyPathsWithAnEmptySegment(): array
+    {
+        return [
+            'a doubled separator' => ['a..b'],
+            'a leading separator' => ['.a.b'],
+            'a trailing separator' => ['a.b.'],
+        ];
+    }
+
+    /**
+     * `getNth(0)` is the first item — the same one `getFirst()` returns.
+     *
+     * Index zero is the boundary of the "must be greater than or equal to 0" rule, and the only
+     * indexes driven were 1, -1 and one past the end, so loosening `< 0` to `<= 0` changed nothing any
+     * test could see.
+     */
+    public function testGetNthReturnsTheFirstItemAtIndexZero(): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":10},{"id":20},{"id":30}]');
+
+        try {
+            self::assertSame(['id' => 10], $this->reader->getNth($filePath, 0));
+            self::assertSame($this->reader->getFirst($filePath), $this->reader->getNth($filePath, 0));
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A repeated key resolves to its FIRST occurrence, and the two walks agree about it.
+     *
+     * Duplicate keys are legal to write and their meaning is left undefined by the specification, so
+     * what matters is that this library answers the same way everywhere: `seekPathInObject()` takes the
+     * first match and stops, and the wildcard walk carries a flag to do the same. Nothing tested the
+     * flag — removing it left the suite green, and the wildcard walk would then have descended into
+     * BOTH values and yielded the second one's items as well.
+     */
+    public function testARepeatedKeyResolvesToItsFirstOccurrence(): void
+    {
+        $plain = $this->writeTemporaryJson('{"items":[{"id":1}],"items":[{"id":2},{"id":3}]}');
+        $wildcard = $this->writeTemporaryJson('{"d":[{"x":[1],"x":[2,3]},{"x":[4],"x":[5]}]}');
+
+        try {
+            self::assertSame([['id' => 1]], $this->reader->read($plain, keyPath: 'items')[0]);
+            self::assertSame(1, $this->reader->count($plain, 'items'));
+
+            self::assertSame(
+                [1, 4],
+                iterator_to_array($this->reader->readGenerator($wildcard, keyPath: 'd.*.x'), false),
+            );
+        } finally {
+            @unlink($plain);
+            @unlink($wildcard);
+        }
+    }
+
+    /**
+     * An escaped quote inside an object KEY does not end the key.
+     *
+     * Keys go through their own reader, separate from the one that scans values, and its escape state
+     * was pinned by nothing: starting that state at "escaped" instead of "not escaped" left the suite
+     * green. A key is a JSON string like any other and may carry anything a string may.
+     */
+    public function testAnEscapedQuoteInsideAnObjectKeyIsRead(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"a\"b":[{"id":7}],"plain":[{"id":8}]}');
+
+        try {
+            self::assertSame([['id' => 7]], $this->reader->read($filePath, keyPath: 'a"b')[0]);
+            self::assertSame([['id' => 8]], $this->reader->read($filePath, keyPath: 'plain')[0]);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * An object key that is the empty string is read, and skipped, like any other.
+     *
+     * `""` is a legal key, and it is the only shape in which the key reader's escape state is
+     * observable at all: start that state at "escaped" and the first character after the opening
+     * quote is swallowed — for a key with anything in it the result is unchanged, but for an empty key
+     * the closing quote is eaten and the key never ends.
+     *
+     * It cannot be a keyPath target — a path segment may not be empty — so the way to reach it is to
+     * make the reader skip past it on the way to something else.
+     */
+    public function testAnEmptyObjectKeyIsSkippedLikeAnyOther(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"":{"ignored":1},"items":[{"id":9}]}');
+
+        try {
+            self::assertSame([['id' => 9]], $this->reader->read($filePath, keyPath: 'items')[0]);
+            self::assertSame(1, $this->reader->count($filePath, 'items'));
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A segment that is not a number, where the document holds a list, matches nothing.
+     *
+     * A list is addressed by index; a name means nothing there. The branch that decides this was
+     * reached but never judged — dropping the `ctype_digit()` half of its condition left the suite
+     * green, and the read would then have descended into a list by name.
+     */
+    public function testANonNumericSegmentOnAListMatchesNothing(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"d":[{"x":[[10,11]]},{"x":[[12]]}]}');
+
+        try {
+            // `d.*.x.0` takes element 0 of every `x`; `d.*.x.name` addresses a list by name and so
+            // resolves to nothing at all, which is a "not found", not a silent empty read.
+            self::assertSame(
+                [10, 11, 12],
+                iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'd.*.x.0'), false),
+            );
+
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('was not found');
+
+            $this->reader->count($filePath, 'd.*.x.name');
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * Every read closes the file it opened, however it ends.
+     *
+     * The reader opens a file per operation and closes it in a `finally`. Nothing watched that:
+     * deleting the `close()` calls, or unwrapping the `finally` around them, left the whole suite
+     * green — a descriptor leak is invisible to an assertion about values, and it only shows up in a
+     * long-lived process as "too many open files" a thousand requests later.
+     *
+     * Three endings are exercised, because they leave by three different doors: consumed to the end,
+     * abandoned half way, and thrown out of.
+     */
+    public function testEveryReadClosesTheFileItOpened(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"groups":[{"items":[1,2,3,4,5]},{"items":[6,7,8]}]}');
+        $broken = $this->writeTemporaryJson('[{"id":1},{"id":2');
+
+        try {
+            $before = $this->openHandleCount();
+
+            for ($round = 0; $round < 40; $round++) {
+                // Consumed to the end.
+                iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'groups.*.items'), false);
+                $this->reader->count($filePath, 'groups.0.items');
+                $this->reader->getLast($filePath, 'groups.0.items');
+
+                // Abandoned after one item.
+                foreach ($this->reader->readGenerator($filePath, keyPath: 'groups.*.items') as $ignored) {
+                    break;
+                }
+
+                // Thrown out of.
+                try {
+                    $this->reader->read($broken);
+                } catch (InvalidArgumentException) {
+                    // The point is the descriptor, not the message.
+                }
+            }
+
+            gc_collect_cycles();
+
+            self::assertSame(
+                $before,
+                $this->openHandleCount(),
+                'a read left the file open',
+            );
+        } finally {
+            @unlink($filePath);
+            @unlink($broken);
+        }
+    }
+
+    /**
+     * How many of this process's open descriptors point at a regular file in the temp directory.
+     *
+     * Counting only that keeps PHPUnit's own handles, and the terminal's, out of the answer.
+     */
+    private function openHandleCount(): int
+    {
+        $listing = (string)shell_exec(sprintf('lsof -p %d 2>/dev/null', getmypid()));
+        $temp = rtrim(sys_get_temp_dir(), '/');
+
+        $open = 0;
+        foreach (explode("\n", $listing) as $line) {
+            if (str_contains($line, $temp . '/pjc-')) {
+                $open++;
+            }
+        }
+
+        return $open;
+    }
+
+    /**
+     * `count()` refuses trailing content too, not only `read()`.
+     *
+     * Both walk the root array to its end, so both are in a position to notice — but only `read()`
+     * was driven, and deleting the check from the counting path changed nothing any test could see.
+     * Two entry points that disagree about whether a file is valid is worse than either answer.
+     */
+    public function testCountRefusesContentAfterTheRootArray(): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}] leftovers');
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('after the root array ended');
+
+            $this->reader->count($filePath);
         } finally {
             @unlink($filePath);
         }
