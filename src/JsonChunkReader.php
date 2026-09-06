@@ -173,43 +173,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         try {
             $this->positionStreamAtTargetArrayStart($stream, $keyPath);
 
-            $processed = 0;
-            $taken = 0;
-            $currentChunk = [];
             $readToTheEnd = true;
 
-            foreach ($this->streamArrayValues($stream, $filePath) as $value) {
-                if ($processed < $offset) {
-                    $processed++;
-                    continue;
-                }
-
-                if ($limit !== null && $taken >= $limit) {
-                    // Stopped early on purpose, so the array was NOT read to its end and the check
-                    // below has nothing to stand on.
-                    $readToTheEnd = false;
-
-                    break;
-                }
-
-                if ($chunkSize === null) {
-                    yield $value;
-                } else {
-                    $currentChunk[] = $value;
-
-                    if (count($currentChunk) >= $chunkSize) {
-                        yield $currentChunk;
-                        $currentChunk = [];
-                    }
-                }
-
-                $processed++;
-                $taken++;
-            }
-
-            if ($chunkSize !== null && $currentChunk !== []) {
-                yield $currentChunk;
-            }
+            yield from $this->applyWindow(
+                values: $this->streamArrayValues($stream, $filePath),
+                chunkSize: $chunkSize,
+                limit: $limit,
+                offset: $offset,
+                readToTheEnd: $readToTheEnd,
+            );
 
             if ($readToTheEnd) {
                 $this->assertNothingFollowsRootArray($stream, $filePath, $keyPath);
@@ -892,18 +864,54 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int $offset,
         string $keyPath,
     ): Generator {
-        $values = $this->streamWildcardValues($filePath, $keyPath);
-        $processed = 0;
+        // Whether the wildcard walk reached the end is of no interest here: the trailing-content rule
+        // applies to a ROOT array only, and a wildcard path is never one.
+        $reachedTheEnd = true;
+
+        yield from $this->applyWindow(
+            values: $this->streamWildcardValues($filePath, $keyPath),
+            chunkSize: $chunkSize,
+            limit: $limit,
+            offset: $offset,
+            readToTheEnd: $reachedTheEnd,
+        );
+    }
+
+    /**
+     * `offset`, `limit` and `chunkSize` applied to a stream of values, one value at a time.
+     *
+     * Both reads windowed their values with the same twenty lines, copied. The copies did not drift in
+     * behaviour, but they drifted in COVERAGE: changing `>=` to `>` in the wildcard copy's chunking
+     * left the whole suite green, because every wildcard test read the values whole. One body cannot
+     * do that.
+     *
+     * @param iterable<int, mixed> $values
+     * @param bool $readToTheEnd lowered when `limit` cuts the read short, so the caller can tell
+     *                           "the source ended" from "we stopped asking"
+     *
+     * @return Generator<int, mixed>
+     */
+    private function applyWindow(
+        iterable $values,
+        int|null $chunkSize,
+        int|null $limit,
+        int $offset,
+        bool &$readToTheEnd,
+    ): Generator {
+        $skipped = 0;
         $taken = 0;
         $currentChunk = [];
 
         foreach ($values as $value) {
-            if ($processed < $offset) {
-                $processed++;
+            if ($skipped < $offset) {
+                $skipped++;
+
                 continue;
             }
 
             if ($limit !== null && $taken >= $limit) {
+                $readToTheEnd = false;
+
                 break;
             }
 
@@ -918,7 +926,6 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 }
             }
 
-            $processed++;
             $taken++;
         }
 

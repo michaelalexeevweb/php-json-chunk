@@ -93,7 +93,7 @@ php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.2.1
+composer require michaelalexeevweb/php-json-chunk:^1.2.2
 ```
 
 ## Quick start

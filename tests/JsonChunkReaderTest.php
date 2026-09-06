@@ -574,6 +574,79 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         ];
     }
 
+    /**
+     * Chunking over a wildcard path, including the short chunk at the end.
+     *
+     * The wildcard read has its own copy of the windowing loop — offset, limit, chunk accumulation —
+     * byte for byte the same as the plain read\'s. Offset and limit were pinned there; the chunk size
+     * was not, and a copy nobody drives is where the two quietly stop agreeing. Changing `>=` to `>`
+     * in that loop left the whole suite green.
+     *
+     * Seven items over three branches divide into 3 + 3 + 1, so the boundary and the remainder are
+     * both in the answer.
+     */
+    public function testWildcardKeyPathChunksIncludingTheLastShortChunk(): void
+    {
+        $filePath = $this->writeTemporaryJson(
+            '{"groups":[{"items":[1,2,3]},{"items":[4,5]},{"items":[6,7]}]}',
+        );
+
+        try {
+            self::assertSame(
+                [[1, 2, 3], [4, 5, 6], [7]],
+                $this->reader->read($filePath, chunkSize: 3, keyPath: 'groups.*.items'),
+            );
+
+            // A chunk size the item count divides exactly must not produce a trailing empty chunk.
+            self::assertSame(
+                [[1, 2, 3, 4, 5, 6, 7]],
+                $this->reader->read($filePath, chunkSize: 7, keyPath: 'groups.*.items'),
+            );
+
+            // And the window still applies underneath the chunking.
+            self::assertSame(
+                [[3, 4], [5]],
+                $this->reader->read($filePath, chunkSize: 2, limit: 3, offset: 2, keyPath: 'groups.*.items'),
+            );
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A numeric segment AFTER a wildcard: `d.*.x.0` takes the first element of every `x`.
+     *
+     * This is the one branch of the wildcard walk nothing reached — renaming the private method that
+     * serves it broke no test at all. The behaviour is right, but a branch no test enters is where the
+     * next change to this walk will land unnoticed, and this walk has been rewritten twice.
+     */
+    public function testWildcardKeyPathTakesANumericSegmentAfterTheWildcard(): void
+    {
+        $filePath = $this->writeTemporaryJson(
+            '{"d":[{"x":[[10,11],[12]]},{"x":[[13]]},{"x":[]}]}',
+        );
+
+        try {
+            // Element 0 of each `x`: [10,11] from the first, [13] from the second. The third `x` is
+            // empty, so it contributes nothing rather than failing the read.
+            self::assertSame(
+                [10, 11, 13],
+                iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'd.*.x.0'), false),
+            );
+
+            self::assertSame(3, $this->reader->count($filePath, 'd.*.x.0'));
+
+            // An index past the end of every branch resolves to nothing at all, which is the same
+            // answer walking the decoded arrays gave.
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('was not found');
+
+            $this->reader->count($filePath, 'd.*.x.9');
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
     public function testCountReturnsTotalForRootArray(): void
     {
         $count = $this->reader->count(__DIR__ . '/fixtures/sample-array.json');
