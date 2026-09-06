@@ -22,12 +22,12 @@ memory that does not grow with the file. It is paid for in time.
 
 | Records | File | Time | Peak memory | Under a 512 MB limit |
 |---:|---:|---:|---:|:--|
-| 10 000 | 1 MB | 6 ms | 7.2 MB | fine |
-| 50 000 | 5 MB | 25 ms | 35.7 MB | fine |
-| 100 000 | 10 MB | 49 ms | 71.5 MB | fine |
-| 500 000 | 51 MB | 246 ms | 356.8 MB | fine |
-| 1 000 000 | 103 MB | 496 ms | 714.0 MB | **out of memory** |
-| 5 000 000 | 528 MB | 2 897 ms | **3 661.5 MB** | **out of memory** |
+| 10k | 1 MB | 6 ms | 7.2 MB | fine |
+| 50k | 5 MB | 25 ms | 35.7 MB | fine |
+| 100k | 10 MB | 49 ms | 71.5 MB | fine |
+| 500k | 51 MB | 246 ms | 356.8 MB | fine |
+| 1M | 103 MB | 496 ms | 714.0 MB | **out of memory** |
+| 5M | 528 MB | 2 897 ms | **3 661.5 MB** | **out of memory** |
 
 It needs about **6.9× the size of the file**, every time, and that ratio does not improve. Give PHP
 4 GB and it will read the 528 MB document in under three seconds. Give it the 512 MB that many
@@ -74,7 +74,7 @@ million records the range is 30 s to 372 s.
 
 | Records | 10k | 50k | 100k | 500k | 1M | 5M |
 |---|---:|---:|---:|---:|---:|---:|
-| ms per 1 000 records | 5.71 | 5.79 | 6.16 | 5.90 | 5.89 | 5.94 |
+| ms per 1 000 records | 5.71 | 5.79 | 6.16 | 5.90 | 5.89 | 5.94 |
 
 ## The numbers
 
@@ -89,13 +89,13 @@ streaming reader, and its column is there to be beaten on memory, not on speed.
 
 | Records | `json_decode()` | PhpJsonChunk | JsonMachine | crocodile2u | Salsify¹ | JsonCollectionParser | JsonDecodeStream |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 10 000 | *6* | **57.1** | 91.7 | 118.5 | 316.1 | 297.1 | 752.1 |
-| 50 000 | *25* | **289.6** | 453.6 | 542.7 | 1 473.6 | 1 536.9 | 3 544.1 |
-| 100 000 | *49* | **615.7** | 936.7 | 1 118.9 | 2 981.9 | 3 047.5 | 7 251.8 |
-| 500 000 | *246* | **2 950.7** | 4 684.3 | 5 628.1 | 15 168.3<br><sub>15 s</sub> | 15 502.5<br><sub>16 s</sub> | 36 726.6<br><sub>37 s</sub> |
-| 1 000 000 | *496* | **5 889.2** | 9 495.9 | 11 356.2<br><sub>11 s</sub> | 30 462.4<br><sub>30 s</sub> | 31 307.9<br><sub>31 s</sub> | 73 515.0<br><sub>1m 13s</sub> |
-| 5 000 000 | *2 897*<br><sub>2.9 s</sub> | **29 700.4**<br><sub>**30 s**</sub> | 47 667.1<br><sub>48 s</sub> | 58 070.8<br><sub>58 s</sub> | 154 132.4<br><sub>2m 34s</sub> | 158 697.6<br><sub>2m 38s</sub> | 371 922.3<br><sub>6m 11s</sub> |
-| **peak MB** | **7.2 → 3 661** | 0.15 | 0.31 | **0.01** | 0.03–0.04 | 0.03–0.04 | 0.04 |
+| 10k | *6* | **57.1** | 91.7 | 118.5 | 316.1 | 297.1 | 752.1 |
+| 50k | *25* | **289.6** | 453.6 | 542.7 | 1 473.6 | 1 536.9 | 3 544.1 |
+| 100k | *49* | **615.7** | 936.7 | 1 118.9 | 2 981.9 | 3 047.5 | 7 251.8 |
+| 500k | *246* | **2 950.7** | 4 684.3 | 5 628.1 | 15 168.3<br><sub>15 s</sub> | 15 502.5<br><sub>16 s</sub> | 36 726.6<br><sub>37 s</sub> |
+| 1M | *496* | **5 889.2** | 9 495.9 | 11 356.2<br><sub>11 s</sub> | 30 462.4<br><sub>30 s</sub> | 31 307.9<br><sub>31 s</sub> | 73 515.0<br><sub>1m 13s</sub> |
+| 5M | *2 897*<br><sub>2.9 s</sub> | **29 700.4**<br><sub>**30 s**</sub> | 47 667.1<br><sub>48 s</sub> | 58 070.8<br><sub>58 s</sub> | 154 132.4<br><sub>2m 34s</sub> | 158 697.6<br><sub>2m 38s</sub> | 371 922.3<br><sub>6m 11s</sub> |
+| **peak MB** | **7.2 → 3 661** | 0.15 | 0.31 | **0.01** | 0.03–0.04 | 0.03–0.04 | 0.04 |
 
 Five million records is where the spread stops being an abstraction: half a minute against six
 minutes, over the same 528 MB file.

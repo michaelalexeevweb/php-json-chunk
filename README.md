@@ -72,10 +72,10 @@ matters is the shape, not the milliseconds.
 | `json_decode()` on the whole file | 71.5 MB | ❌ | **49 ms** |
 | [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | 0.15 MB | ✅ | **616 ms** |
 | [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 937 ms |
-| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 119 ms |
-| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.03 MB | ✅ | 2 982 ms¹ |
-| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.03 MB | ✅ | 3 047 ms |
-| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 252 ms |
+| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 119 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.03 MB | ✅ | 2 982 ms¹ |
+| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.03 MB | ✅ | 3 047 ms |
+| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 252 ms |
 
 **Read the first row before the others.** If the file fits in memory, `json_decode()` is ten to twelve
 times faster than this library at every size, and you should use it. Streaming buys one thing — memory that does not grow
