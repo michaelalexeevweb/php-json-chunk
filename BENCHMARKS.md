@@ -15,7 +15,7 @@ Back to the [README](README.md).
 ## The question worth asking first
 
 **Does the file fit in memory?** If it does, `json_decode()` is faster than every streaming reader
-here — ten times faster at five million records — and you should use it. Streaming buys one thing:
+here — ten to twelve times faster than this one, at every size — and you should use it. Streaming buys one thing:
 memory that does not grow with the file. It is paid for in time.
 
 `json_decode()` on the whole file, same documents:
@@ -78,22 +78,43 @@ million records the range is 30 s to 372 s.
 
 ## The numbers
 
-Time in milliseconds, peak memory delta in MB.
+**Every number is one complete read**: open the file, walk every record to the end, hand each one back
+as a PHP value. Not a chunk, not a sample, and no `chunkSize` — the loop is item by item. So the
+5 000 000 row is five million records read, and 29 700 ms over five million records is **5.9 µs per
+record**.
 
-| Records | PhpJsonChunk | JsonMachine | crocodile2u | Salsify¹ | JsonCollectionParser | JsonDecodeStream |
-|---:|---:|---:|---:|---:|---:|---:|
-| 10 000 | **57.1** | 91.7 | 118.5 | 316.1 | 297.1 | 752.1 |
-| 50 000 | **289.6** | 453.6 | 542.7 | 1 473.6 | 1 536.9 | 3 544.1 |
-| 100 000 | **615.7** | 936.7 | 1 118.9 | 2 981.9 | 3 047.5 | 7 251.8 |
-| 500 000 | **2 950.7** | 4 684.3 | 5 628.1 | 15 168.3 | 15 502.5 | 36 726.6 |
-| 1 000 000 | **5 889.2** | 9 495.9 | 11 356.2 | 30 462.4 | 31 307.9 | 73 515.0 |
-| 5 000 000 | **29 700.4** | 47 667.1 | 58 070.8 | 154 132.4 | 158 697.6 | 371 922.3 |
-| **peak MB** | 0.15 | 0.31 | **0.01** | 0.03 | 0.03 | 0.04 |
+Time in milliseconds, with the wall-clock reading beneath it once milliseconds stop being legible.
+`json_decode()` is in the table because it is what everyone actually compares against — it is not a
+streaming reader, and its column is there to be beaten on memory, not on speed.
 
-`PhpJsonChunk` is the fastest at every size, by about 1.6× over the next one. It is **not** the
-thinnest: `crocodile2u` holds a fifteenth of the memory and three others hold a quarter of it. What
-0.15 MB buys is a decoded PHP value per item and a key path to reach it; a parser that hands you
-events rather than values has less to keep.
+| Records | `json_decode()` | PhpJsonChunk | JsonMachine | crocodile2u | Salsify¹ | JsonCollectionParser | JsonDecodeStream |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 000 | *6* | **57.1** | 91.7 | 118.5 | 316.1 | 297.1 | 752.1 |
+| 50 000 | *25* | **289.6** | 453.6 | 542.7 | 1 473.6 | 1 536.9 | 3 544.1 |
+| 100 000 | *49* | **615.7** | 936.7 | 1 118.9 | 2 981.9 | 3 047.5 | 7 251.8 |
+| 500 000 | *246* | **2 950.7** | 4 684.3 | 5 628.1 | 15 168.3<br><sub>15 s</sub> | 15 502.5<br><sub>16 s</sub> | 36 726.6<br><sub>37 s</sub> |
+| 1 000 000 | *496* | **5 889.2** | 9 495.9 | 11 356.2<br><sub>11 s</sub> | 30 462.4<br><sub>30 s</sub> | 31 307.9<br><sub>31 s</sub> | 73 515.0<br><sub>1m 13s</sub> |
+| 5 000 000 | *2 897*<br><sub>2.9 s</sub> | **29 700.4**<br><sub>**30 s**</sub> | 47 667.1<br><sub>48 s</sub> | 58 070.8<br><sub>58 s</sub> | 154 132.4<br><sub>2m 34s</sub> | 158 697.6<br><sub>2m 38s</sub> | 371 922.3<br><sub>6m 11s</sub> |
+| **peak MB** | **7.2 → 3 661** | 0.15 | 0.31 | **0.01** | 0.03–0.04 | 0.03–0.04 | 0.04 |
+
+Five million records is where the spread stops being an abstraction: half a minute against six
+minutes, over the same 528 MB file.
+
+**Read the last row across, not down.** Every streaming reader holds the same memory at ten thousand
+records as at five million — two of them wander by a hundredth of a megabyte between sizes, which is
+rounding, not growth. `json_decode()` has an arrow instead of a number, because its memory *is* the
+file: 6.9× of it, every time. That is the only difference in this table that changes what is
+possible, rather than what is quick.
+
+`json_decode()` is roughly **ten to twelve times faster** than this library at every size where it
+runs at all — 9.5× at ten thousand records, 12.6× at a hundred thousand, 10.3× at five million. It
+stops running at a file of roughly 70 MB under a 512 MB limit, and that is the whole reason the rest
+of this table exists.
+
+Among the streaming readers, `PhpJsonChunk` is the fastest at every size, by about 1.6× over the next
+one. It is **not** the thinnest: `crocodile2u` holds a fifteenth of the memory and three others hold a
+quarter of it. What 0.15 MB buys is a decoded PHP value per item and a key path to reach it; a parser
+that hands you events rather than values has less to keep.
 
 <sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
 elements without ever building one, so its time is a floor rather than a like-for-like measurement.
@@ -102,7 +123,10 @@ Every other column hands back a PHP value for each element, and the benchmark it
 ## Method
 
 - Dataset: synthetic root-array JSON, identical for every parser, five fields per record.
-- Metric: wall-clock time around the loop, and peak memory delta.
+- Metric: wall-clock time around the **whole** read — constructing the reader, opening the file, and
+  iterating every record to the end — plus the peak memory delta over that span. Nothing is amortised
+  and nothing is sampled.
+- No chunking: every parser is asked for one item at a time, which is the shape they all share.
 - Each size is generated once and read by every parser in turn; run order is shuffled between runs.
 - `json_decode()` is measured separately, one process per size, so a run that exhausts memory does not
   take the others with it. That is also how the 512 MB column was produced.

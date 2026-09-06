@@ -28,9 +28,12 @@ Everything below is detail.
 ## Why this one
 
 **It is the fastest of them.** 100 000 records, same file, same loop — 616 ms against JsonMachine's
-937 ms, and 7 252 ms for the slowest in the set; at five million records, 29.7 s against 47.7 s and
-371.9 s. Plain `json_decode()` is faster still when the file fits in memory, which is the honest first
-question and the [comparison](#comparison) answers it.
+937 ms, and 7 252 ms for the slowest in the set. At five million records the gap stops being an
+abstraction: **30 seconds** against 48 seconds, and **6 minutes 11 seconds** for the slowest — over
+the same 528 MB file.
+
+Plain `json_decode()` is faster still when the file fits in memory — which is the honest first
+question, and the [comparison](#comparison) answers it.
 
 **Its answers match PHP's own parser.** Checked against JSONTestSuite — the corpus written to break
 JSON parsers — over 289 documents it is meant to read. Not one verdict differs from `json_decode()`.
@@ -60,8 +63,9 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 
 ## Comparison
 
-100 000 records, a 10 MB file, the same loop over every item. One machine, 2026-09-06 — yours will
-differ, so what matters is the shape, not the milliseconds.
+100 000 records, a 10 MB file. Each figure is one **complete** read — every record walked to the end
+and handed back as a PHP value, no chunking. One machine, 2026-09-06 — yours will differ, so what
+matters is the shape, not the milliseconds.
 
 | Approach | Peak memory | Streaming | Time |
 |---|---:|:--:|---:|
@@ -73,8 +77,8 @@ differ, so what matters is the shape, not the milliseconds.
 | [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.03 MB | ✅ | 3 047 ms |
 | [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 252 ms |
 
-**Read the first row before the others.** If the file fits in memory, `json_decode()` beats every
-streaming reader here and you should use it. Streaming buys one thing — memory that does not grow
+**Read the first row before the others.** If the file fits in memory, `json_decode()` is ten to twelve
+times faster than this library at every size, and you should use it. Streaming buys one thing — memory that does not grow
 with the file — and it is paid for in time.
 
 The catch is that `json_decode()` needs about **6.9× the size of the file**. At five million records
