@@ -18,12 +18,14 @@ require_once __DIR__ . '/../vendor/autoload.php';
  *     php bin/jsontestsuite.php
  *     php bin/jsontestsuite.php --corpus=/path/to/JSONTestSuite/test_parsing
  *
- * What is compared, and why not simply "does it parse": this reader reads ROOT ARRAYS. For a file
- * whose root is an object, a string or a number it refuses by scope, which is not a verdict about
- * the JSON. So the corpus splits in two:
+ * What is compared, and why not simply "does it parse": this reader reads containers — a root
+ * array or a root object. For a file whose root is a single string or number it refuses by scope,
+ * which is not a verdict about the JSON. So the corpus splits in two:
  *
- *   - root arrays: the verdict must match `json_decode()`, file for file. This is the real test;
- *   - everything else: the only thing that matters is that nothing is accepted.
+ *   - a root array or object: the verdict must match `json_decode()`, file for file. This is the
+ *     real test;
+ *   - everything else — a document that is a single string, number, boolean or null: the only thing
+ *     that matters is that nothing is accepted.
  *
  * Each file runs in its own process. Part of this corpus exists to kill parsers, and a stack
  * overflow in one file must not take the rest of the run with it.
@@ -73,7 +75,7 @@ function corpusDirectory(array $arguments): string
 /**
  * One file, judged twice. Returns null when the file could not be judged at all.
  *
- * @return array{php: string, ours: string, rootIsArray: bool, reason: string}|null
+ * @return array{php: string, ours: string, rootIsContainer: bool, reason: string}|null
  */
 function judge(string $filePath): array|null
 {
@@ -108,7 +110,12 @@ function judge(string $filePath): array|null
         $reason = $error->getMessage();
     }
 
-    return ['php' => $php, 'ours' => $ours, 'rootIsArray' => $firstByte === '[', 'reason' => $reason];
+    return [
+        'php' => $php,
+        'ours' => $ours,
+        'rootIsContainer' => $firstByte === '[' || $firstByte === '{',
+        'reason' => $reason,
+    ];
 }
 
 // A single file was asked for: judge it here and print one line. This is the mode the runner below
@@ -132,7 +139,7 @@ if ($single !== null) {
         basename($single),
         $verdict['php'],
         $verdict['ours'],
-        $verdict['rootIsArray'] ? 'root-array' : 'out-of-scope',
+        $verdict['rootIsContainer'] ? 'container' : 'out-of-scope',
         str_replace(["\n", "\t"], ' ', substr($verdict['reason'], 0, 110)),
     ));
 
@@ -167,7 +174,7 @@ foreach ($files as $file) {
 
     [$name, $php, $ours, $scope, $reason] = array_pad(explode("\t", $line), 5, '');
 
-    if ($scope !== 'root-array') {
+    if ($scope !== 'container') {
         if ($ours === 'accept') {
             $acceptedOutOfScope[] = $name;
         }
@@ -187,14 +194,14 @@ foreach ($files as $file) {
     }
 }
 
-fwrite(STDOUT, sprintf("\nCorpus: %s\nFiles: %d (%d root arrays)\n", $directory, count($files), $inScope));
+fwrite(STDOUT, sprintf("\nCorpus: %s\nFiles: %d (%d containers)\n", $directory, count($files), $inScope));
 
 foreach (['y_' => 'must be accepted', 'n_' => 'must be rejected', 'i_' => 'implementation-defined'] as $prefix => $label) {
     [$total, $agreed] = $byClass[$prefix];
     fwrite(STDOUT, sprintf("  %-3s %-24s %3d files, agreeing with json_decode: %d\n", $prefix, $label, $total, $agreed));
 }
 
-fwrite(STDOUT, sprintf("\nDisagreements on root arrays: %d\n", count($disagreements)));
+fwrite(STDOUT, sprintf("\nDisagreements on containers: %d\n", count($disagreements)));
 foreach ($disagreements as $disagreement) {
     fwrite(STDOUT, '  ' . $disagreement . "\n");
 }

@@ -116,15 +116,24 @@ final class ReadmeExamplesTest extends TestCase
             $fileForVariable['$' . $assignment[1]] = $assignment[2];
         }
 
-        /** @var array<string, array<int, string>> $pathsByFile */
+        /** @var array<string, array<int, array<int, string>>> $pathsByFile */
         $pathsByFile = [];
         /** @var array<string, bool> $rootIsAList */
         $rootIsAList = [];
 
-        preg_match_all('/->(?:count|read|readIterator|readGenerator|getFirst|getLast|getNth|forEach)\((.*?)\);/s', $block, $calls, PREG_SET_ORDER);
+        // Not every call ends in `);` — one inside a `foreach (...)` header does not, and a block
+        // whose call the scan misses gets no document written for it, which fails the block for a
+        // reason that has nothing to do with the block.
+        preg_match_all(
+            '/->(count|read|readIterator|readGenerator|readPaths|getFirst|getLast|getNth|forEach)\((.*?)\)\s*(?:;|as\s)/s',
+            $block,
+            $calls,
+            PREG_SET_ORDER,
+        );
 
         foreach ($calls as $call) {
-            $arguments = $call[1];
+            $method = $call[1];
+            $arguments = $call[2];
 
             $fileName = null;
             if (preg_match("/__DIR__ \\. '\\/([\\w.-]+\\.json)'/", $arguments, $literal) === 1) {
@@ -138,7 +147,32 @@ final class ReadmeExamplesTest extends TestCase
             }
 
             if (preg_match("/keyPath:\s*'([^']+)'/", $arguments, $path) === 1) {
-                $pathsByFile[$fileName][] = $path[1];
+                $pathsByFile[$fileName][] = explode('.', $path[1]);
+
+                continue;
+            }
+
+            // The segment form — `keyPath: ['a.b']` — names one key per element, and the elements are
+            // literal, so they are joined back with a separator no key of theirs contains.
+            if (preg_match('/keyPath:\s*\[([^\]]*)\]/', $arguments, $segments) === 1) {
+                preg_match_all("/'([^']*)'/", $segments[1], $literals);
+
+                if ($literals[1] !== []) {
+                    // Already segments, and literal: a dot inside one of them is part of the name.
+                    $pathsByFile[$fileName][] = $literals[1];
+
+                    continue;
+                }
+            }
+
+            // readPaths() takes a LIST of paths as its second argument, with no `keyPath:` label to
+            // recognise them by — the method name is what says they are paths.
+            if ($method === 'readPaths') {
+                preg_match_all("/'([^']+)'/", $arguments, $many);
+
+                foreach ($many[1] as $literal) {
+                    $pathsByFile[$fileName][] = explode('.', $literal);
+                }
 
                 continue;
             }
@@ -169,7 +203,7 @@ final class ReadmeExamplesTest extends TestCase
     }
 
     /**
-     * @param array<int, string> $keyPaths
+     * @param array<int, array<int, string>> $keyPaths each already split into literal segments
      *
      * @return array<mixed>
      */
@@ -177,7 +211,7 @@ final class ReadmeExamplesTest extends TestCase
     {
         $document = [];
         foreach ($keyPaths as $keyPath) {
-            $document = $this->graftPath($document, explode('.', $keyPath));
+            $document = $this->graftPath($document, $keyPath);
         }
 
         return $document;

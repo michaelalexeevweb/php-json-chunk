@@ -93,7 +93,7 @@ php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.2.3
+composer require michaelalexeevweb/php-json-chunk:^1.3.0
 ```
 
 ## Quick start
@@ -179,10 +179,34 @@ A 20 MB file of ordinary records reads at a 4 MB peak; a 20 MB file that is one 
 not. This is a property of reading a JSON array element at a time, not a limit you can raise — if your
 elements are that big, they are the unit that has to fit in memory.
 
-`filePath` must be a path on the filesystem — a plain path or a `file://` URI. Stream wrappers
-(`php://`, `data://`, `http://`) are refused: this reader seeks and re-reads within the file, which a
-wrapper does not generally support. Anything that has to come from a wrapper should be written to a
-file first.
+### Where the bytes come from
+
+A path on the filesystem, a string already in memory, or an open stream:
+
+```php
+use PhpJsonChunk\Source\StringSource;
+use PhpJsonChunk\Source\StreamSource;
+
+$payload = '{"items":[{"id":1},{"id":2}]}';
+
+$reader->read(__DIR__ . '/data.json', keyPath: 'items');
+$reader->read(new StringSource($payload, 'the upload'), keyPath: 'items');
+
+$handle = fopen('php://memory', 'r+b');
+fwrite($handle, $payload);
+rewind($handle);
+$reader->read(new StreamSource($handle), keyPath: 'items');
+```
+
+The reader never seeks — it holds one block and a single pushed-back character — so a source that can
+be read once, in order, is enough. A source names itself in complaints, so a failure is still
+traceable when there is no path to point at.
+
+A bare `php://` or `http://` string is still refused: pass it as a `StreamSource` instead, so it is
+clear that a stream is what you meant.
+
+*(Earlier versions of this file said wrappers were refused because the reader "seeks and re-reads
+within the file". It never did. The restriction was `is_file()`, and it is gone.)*
 
 ## API overview
 
@@ -543,6 +567,69 @@ Use `PhpJsonChunk` when you need to:
 - It is **not** a general-purpose JSON writer
 - It is **not** a replacement for every JSON parser use-case
 - It is focused on **reading JSON arrays** from files, especially large ones
+
+### Objects, not only arrays
+
+A document keyed by id — `{"u1": {...}, "u2": {...}}` — streams as `key => value`:
+
+```php
+foreach ($reader->readGenerator(__DIR__ . '/users.json') as $id => $user) {
+    echo $id, ': ', $user['name'], PHP_EOL;
+}
+```
+
+A `keyPath` may land on an object as well as on an array. Chunked, the names stay with their values.
+
+### Key paths as segments
+
+`keyPath` takes a dotted string or a list of segments. The list form is how a key containing a dot is
+named — a domain, a version, `user.name`:
+
+```php
+$reader->read(__DIR__ . '/data.json', keyPath: 'data.0.items');   // the short form
+$reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key containing a dot
+```
+
+`'*'` means "every element of this list" in both forms.
+
+### Several paths in one pass
+
+```php
+foreach ($reader->readPaths(__DIR__ . '/data.json', ['users', 'logs']) as $path => $value) {
+    echo $path, ': ', json_encode($value), PHP_EOL;
+}
+```
+
+The document is read once, not once per path. The key is the path that matched, so a path matching
+many values appears many times.
+
+### Arrays or objects
+
+```php
+$reader = new JsonChunkReader(associative: false);   // items come back as stdClass
+```
+
+Object keys stay strings whatever this says: a key is a name, not a value.
+
+### Stopping early
+
+A `forEach()` callback that returns `false` stops the walk. Anything else — including nothing at all —
+carries on.
+
+```php
+$reader->forEach(__DIR__ . '/data.json', function (array $item): bool {
+    return $item['id'] < 1000;   // stop once the ids get big
+});
+```
+
+### When something is wrong
+
+Complaints name the byte they failed at, and it points at the START of the value that could not be
+read rather than wherever the scanner stopped:
+
+```
+Invalid JSON in file "data.json" at byte 30: Syntax error
+```
 
 ## Conformance
 

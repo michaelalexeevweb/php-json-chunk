@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace PhpJsonChunk\Internal;
 
-use SplFileObject;
+use PhpJsonChunk\Contract\JsonSourceInterface;
 
 /**
  * One read in progress: the open file together with the block buffer that belongs to it.
@@ -19,11 +19,9 @@ use SplFileObject;
  * Binding the buffer to the file leaves the reader holding no read state at all, so any number of
  * reads can be in flight at once.
  *
- * `SplFileObject` rather than an `fopen()` handle for one reason: `resource` is not a type PHP can
- * declare — write it and the engine reads it as a class name and warns — so a handle can only travel
- * untyped, with a docblock asking to be believed. An object can be declared, and reading a block
- * through it costs the same: over a 20 MB file both forms take 10-15 ms, against the ~500 ms the
- * parsing above it takes.
+ * Where the bytes come from is a `JsonSourceInterface`, so a file, a string and an open stream all
+ * read the same way. The reader never seeks — it holds one block and a single pushed-back character —
+ * which is what makes a read-once source enough.
  *
  * The buffer fields are public on purpose: the scanners walk them with `strcspn()`/`strspn()` at C
  * level, and putting an accessor call in that loop is exactly the cost this library exists to avoid.
@@ -51,12 +49,21 @@ final class JsonStream
     /** Number of valid bytes in $buf. */
     public int $bufLen = 0;
 
-    /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
-    private SplFileObject|null $file;
+    /**
+     * Bytes of the document that came before the current block.
+     *
+     * Kept so a complaint can say WHERE. "Syntax error" on a 200 MB file is an invitation to search by
+     * hand; the reader knows the answer and used not to say it. One addition per 64 KB block is not a
+     * cost worth weighing against that.
+     */
+    private int $bytesBeforeBuffer = 0;
 
-    public function __construct(SplFileObject $file)
+    /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
+    private JsonSourceInterface|null $source;
+
+    public function __construct(JsonSourceInterface $source)
     {
-        $this->file = $file;
+        $this->source = $source;
     }
 
     /**
@@ -64,17 +71,7 @@ final class JsonStream
      */
     public function readBlock(): string|null
     {
-        if ($this->file === null || $this->file->eof()) {
-            return null;
-        }
-
-        $chunk = $this->file->fread(self::BLOCK_SIZE);
-
-        if ($chunk === false || $chunk === '') {
-            return null;
-        }
-
-        return $chunk;
+        return $this->source?->readBlock(self::BLOCK_SIZE);
     }
 
     /**
@@ -89,11 +86,34 @@ final class JsonStream
             return false;
         }
 
-        $this->buf = $chunk;
-        $this->bufLen = strlen($chunk);
-        $this->bufPos = 0;
+        $this->adopt($chunk);
 
         return true;
+    }
+
+    /**
+     * Takes a freshly read block as the current buffer, starting at $startPos.
+     *
+     * The one place the buffer is replaced, so the one place that has to remember how much of the
+     * document is already behind it.
+     */
+    public function adopt(string $chunk, int $startPos = 0): void
+    {
+        $this->bytesBeforeBuffer += $this->bufLen;
+        $this->buf = $chunk;
+        $this->bufLen = strlen($chunk);
+        $this->bufPos = $startPos;
+    }
+
+    /**
+     * How many bytes of the document have been consumed — the position a complaint should name.
+     *
+     * Characters pushed back have been read but not consumed, so they are subtracted: the offset must
+     * point at the byte the reader is about to look at, not one past it.
+     */
+    public function offset(): int
+    {
+        return $this->bytesBeforeBuffer + $this->bufPos - count($this->charBuffer);
     }
 
     public function pushBack(string $char): void
@@ -103,12 +123,13 @@ final class JsonStream
 
     public function close(): void
     {
-        // SplFileObject closes the file when the last reference to it goes.
-        $this->file = null;
+        $this->source?->close();
+        $this->source = null;
 
         $this->charBuffer = [];
         $this->buf = '';
         $this->bufPos = 0;
         $this->bufLen = 0;
+        $this->bytesBeforeBuffer = 0;
     }
 }

@@ -6,6 +6,9 @@ namespace PhpJsonChunk\Tests;
 
 use InvalidArgumentException;
 use PhpJsonChunk\JsonChunkReader;
+use PhpJsonChunk\Source\StreamSource;
+use PhpJsonChunk\Source\StringSource;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 
 final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
@@ -308,7 +311,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param string|null $keyPath the entry point under test — each reaches the first byte its own way
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('byteOrderMarkEntryPoints')]
+    #[DataProvider('byteOrderMarkEntryPoints')]
     public function testAByteOrderMarkIsNamedAsTheCause(string|null $keyPath): void
     {
         $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-bom-');
@@ -341,19 +344,41 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      * A root that is an object is not a dead end — it is the documented case for `keyPath`, and the
      * message now says so instead of stopping at the verdict.
      */
-    public function testANonArrayRootPointsAtKeyPath(): void
+    /**
+     * A root that is neither an array nor an object has nothing to stream, and says so.
+     *
+     * A root OBJECT used to land here too and was told to pass a `keyPath`; it is now streamed as
+     * `key => value` like any other container, so the only documents left without a way in are the
+     * ones that hold a single value.
+     *
+     * @param string $document a whole JSON document that is one value
+     */
+    #[DataProvider('scalarRootDocuments')]
+    public function testARootThatIsNotAContainerIsRefused(string $document): void
     {
-        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-root-');
-        file_put_contents($filePath, '{"items":[{"id":1}]}');
+        $filePath = $this->writeTemporaryJson($document);
 
         try {
             $this->expectException(InvalidArgumentException::class);
-            $this->expectExceptionMessage('keyPath');
+            $this->expectExceptionMessage('must be an array or an object');
 
             $this->reader->read($filePath);
         } finally {
             @unlink($filePath);
         }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function scalarRootDocuments(): array
+    {
+        return [
+            'a string' => ['"just a string"'],
+            'a number' => ['42'],
+            'a boolean' => ['true'],
+            'null' => ['null'],
+        ];
     }
 
     /**
@@ -418,7 +443,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param string $trailing what follows the array
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('trailingContent')]
+    #[DataProvider('trailingContent')]
     public function testContentAfterTheRootArrayIsRefused(string $trailing): void
     {
         $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]' . $trailing);
@@ -452,7 +477,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param string $trailing whitespace that must be ignored
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('trailingWhitespace')]
+    #[DataProvider('trailingWhitespace')]
     public function testWhitespaceAfterTheRootArrayIsFine(string $trailing): void
     {
         $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]' . $trailing);
@@ -537,7 +562,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param array{0: int|null, 1: int|null, 2: int} $arguments chunkSize, limit, offset
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('invalidReadArguments')]
+    #[DataProvider('invalidReadArguments')]
     public function testEveryEntryPointRefusesAnInvalidArgumentAtTheCall(array $arguments): void
     {
         $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]');
@@ -669,7 +694,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param string $shape the second item, whose awkward part is pushed onto the seam
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('tokensAcrossTheReadBlockBoundary')]
+    #[DataProvider('tokensAcrossTheReadBlockBoundary')]
     public function testATokenStraddlingTheReadBlockBoundaryIsReadWhole(string $shape): void
     {
         $blockSize = 65536;
@@ -714,7 +739,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
     /**
      * A key path with an empty segment is refused rather than quietly treated as something else.
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('keyPathsWithAnEmptySegment')]
+    #[DataProvider('keyPathsWithAnEmptySegment')]
     public function testAKeyPathWithAnEmptySegmentIsRefused(string $keyPath): void
     {
         $filePath = $this->writeTemporaryJson('{"a":{"b":[{"id":1}]}}');
@@ -960,7 +985,7 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      *
      * @param string $source a path this reader cannot read from
      */
-    #[\PHPUnit\Framework\Attributes\DataProvider('streamWrapperSources')]
+    #[DataProvider('streamWrapperSources')]
     public function testAStreamWrapperIsNamedAsTheCause(string $source): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -1103,6 +1128,279 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         } finally {
             @unlink($filePath);
         }
+    }
+
+    /**
+     * A complaint says WHERE.
+     *
+     * `Invalid JSON in file: Syntax error` on a 200 MB export is an invitation to search by hand, and
+     * the reader has always known the answer: it counts the bytes it has consumed. The offset points
+     * at the START of the value that could not be read, not at wherever the scanner happened to stop —
+     * by the time `json_decode()` refuses an element, the stream has already run past its end.
+     *
+     * @param string $document a document whose first bad byte is known
+     * @param int $offset where the trouble begins
+     */
+    #[DataProvider('documentsWithAKnownBadOffset')]
+    public function testAComplaintNamesTheByteItFailedAt(string $document, int $offset): void
+    {
+        $filePath = $this->writeTemporaryJson($document);
+
+        try {
+            try {
+                $this->reader->read($filePath);
+                self::fail('the document was expected to be refused');
+            } catch (InvalidArgumentException $exception) {
+                self::assertMatchesRegularExpression(
+                    sprintf('/at byte %d\b/', $offset),
+                    $exception->getMessage(),
+                    'the complaint did not point at the value that failed',
+                );
+            }
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: int}>
+     */
+    public static function documentsWithAKnownBadOffset(): array
+    {
+        return [
+            // [1,,2] — the second comma is where a value should start, at index 3.
+            'a missing value' => ['[1,,2]', 3],
+            // The object at index 1 has no colon; the object itself starts at 1.
+            'an object without a colon' => ['[{"a" 1}]', 1],
+            // `tru` starts at 7.
+            'a truncated literal' => ['[1, 2, tru]', 7],
+        ];
+    }
+
+    /**
+     * A key that contains a dot is reachable, because the path may be given as segments.
+     *
+     * The dotted string form cannot name it — `{"a.b": []}` was simply unreachable — and dots in keys
+     * are ordinary: a domain, a version, `user.name`.
+     */
+    public function testAKeyContainingADotIsReachableAsSegments(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"a.b":[{"id":1},{"id":2}],"plain":[{"id":9}]}');
+
+        try {
+            self::assertSame([['id' => 1], ['id' => 2]], $this->reader->read($filePath, keyPath: ['a.b'])[0]);
+            self::assertSame(2, $this->reader->count($filePath, ['a.b']));
+            self::assertSame(['id' => 1], $this->reader->getFirst($filePath, ['a.b']));
+
+            // The dotted form still reads the same document, and still cannot see that key.
+            self::assertSame([['id' => 9]], $this->reader->read($filePath, keyPath: 'plain')[0]);
+
+            // Segments and dots describe the same path when no key contains a dot.
+            $nested = $this->writeTemporaryJson('{"a":{"b":[{"id":7}]}}');
+            self::assertSame(
+                $this->reader->read($nested, keyPath: 'a.b')[0],
+                $this->reader->read($nested, keyPath: ['a', 'b'])[0],
+            );
+            @unlink($nested);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A callback that returns `false` stops the walk; anything else carries on.
+     *
+     * Without this the only way out of `forEach()` was to throw, which turns "I have seen enough" into
+     * an exception the caller then has to catch and work out whether it was really an error.
+     */
+    public function testForEachStopsWhenTheCallbackReturnsFalse(): void
+    {
+        $filePath = $this->writeTemporaryJson('[1,2,3,4,5,6,7,8,9,10]');
+
+        try {
+            $seen = 0;
+            $processed = $this->reader->forEach($filePath, static function () use (&$seen): bool {
+                $seen++;
+
+                return $seen < 4;
+            });
+
+            self::assertSame(4, $seen);
+            self::assertSame(4, $processed);
+
+            // Only a strict `false` stops: a callback that returns nothing, or a falsy value that is
+            // not `false`, must behave as it always did.
+            // `null` is not a standalone return type before PHP 8.2, so these say `mixed`.
+            $carryOn = [
+                static fn(): mixed => null,
+                static fn(): mixed => 0,
+                static fn(): mixed => '',
+            ];
+
+            foreach ($carryOn as $callback) {
+                $count = 0;
+                $this->reader->forEach($filePath, static function () use ($callback, &$count): mixed {
+                    $count++;
+
+                    return $callback();
+                });
+                self::assertSame(10, $count);
+            }
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * Items come back as arrays or as `stdClass`, as the reader was built to say.
+     *
+     * A choice made once for an application rather than per read — which is why it is a constructor
+     * flag and not a seventh argument on methods that already take six. It has to survive the detour
+     * through `tempChunkDir`, or that option would quietly change what a read returns.
+     */
+    public function testTheReaderCanReturnObjectsInsteadOfArrays(): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1,"nested":{"deep":true}},{"id":2,"nested":{"deep":false}}]');
+        $chunkDir = $this->workingDirectoryForChunks();
+
+        try {
+            $asArrays = new JsonChunkReader();
+            $first = $asArrays->getFirst($filePath);
+            self::assertIsArray($first);
+            self::assertIsArray($first['nested']);
+
+            $asObjects = new JsonChunkReader(associative: false);
+            $firstObject = $asObjects->getFirst($filePath);
+            self::assertInstanceOf(\stdClass::class, $firstObject);
+            self::assertInstanceOf(\stdClass::class, $firstObject->nested);
+
+            // Through temporary chunk files, the shape has to survive a round trip on disk.
+            $chunks = $asObjects->read($filePath, chunkSize: 1, tempChunkDir: $chunkDir);
+            self::assertInstanceOf(\stdClass::class, $chunks[0][0]);
+        } finally {
+            array_map('unlink', (array)glob($chunkDir . '/*'));
+            @rmdir($chunkDir);
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A document that is not a file: a string already in memory, or an open stream.
+     *
+     * The reader never seeks — it holds one block and a single pushed-back character — so a source
+     * that can be read once, in order, is enough. This library said the opposite of itself for a
+     * while, refusing stream wrappers on the grounds that it "seeks and re-reads within the file",
+     * which it never did.
+     */
+    public function testAStringAndAStreamAreReadLikeAFile(): void
+    {
+        $document = '{"items":[{"id":1},{"id":2},{"id":3}]}';
+
+        self::assertSame(
+            [['id' => 1], ['id' => 2], ['id' => 3]],
+            $this->reader->read(new StringSource($document), keyPath: 'items')[0],
+        );
+        self::assertSame(3, $this->reader->count(new StringSource($document), 'items'));
+        self::assertSame(['id' => 3], $this->reader->getLast(new StringSource($document), 'items'));
+
+        $handle = fopen('php://memory', 'r+b');
+        self::assertIsResource($handle);
+        fwrite($handle, $document);
+        rewind($handle);
+
+        try {
+            self::assertSame(
+                [['id' => 1], ['id' => 2], ['id' => 3]],
+                iterator_to_array($this->reader->readGenerator(new StreamSource($handle), keyPath: 'items'), false),
+            );
+        } finally {
+            fclose($handle);
+        }
+
+        // A source names itself in complaints, so a failure is still traceable without a path.
+        try {
+            $this->reader->read(new StringSource('[1,', 'the upload'));
+            self::fail('the truncated document was expected to be refused');
+        } catch (InvalidArgumentException $exception) {
+            self::assertStringContainsString('the upload', $exception->getMessage());
+        }
+    }
+
+    /**
+     * Several paths, one pass over the document.
+     *
+     * Two paths used to mean two reads. The key is the path that matched, so a `foreach` reads as
+     * "this value, from that path"; generators allow repeated keys, so a path matching many values
+     * simply appears many times.
+     */
+    public function testSeveralPathsAreReadInOnePass(): void
+    {
+        $document = '{"meta":{"v":1},"users":[{"id":1},{"id":2}],"logs":[{"e":"a"},{"e":"b"}]}';
+
+        $collected = [];
+        foreach ($this->reader->readPaths(new StringSource($document), ['users', 'logs']) as $path => $value) {
+            $collected[] = [$path, $value];
+        }
+
+        self::assertSame(
+            [
+                ['users', ['id' => 1]],
+                ['users', ['id' => 2]],
+                ['logs', ['e' => 'a']],
+                ['logs', ['e' => 'b']],
+            ],
+            $collected,
+        );
+
+        // A path landing on a single value gives that value; one landing on a list gives its items.
+        $mixed = [];
+        foreach ($this->reader->readPaths(new StringSource($document), ['meta.v', 'users']) as $path => $value) {
+            $mixed[] = [$path, $value];
+        }
+        self::assertSame([['meta.v', 1], ['users', ['id' => 1]], ['users', ['id' => 2]]], $mixed);
+
+        // A path that matches nothing is named rather than passed over in silence.
+        try {
+            iterator_to_array($this->reader->readPaths(new StringSource($document), ['users', 'absent']));
+            self::fail('the missing path was expected to be reported');
+        } catch (RuntimeException $exception) {
+            self::assertStringContainsString('"absent"', $exception->getMessage());
+        }
+    }
+
+    /**
+     * And it really is one pass: the source is asked for each block once, not once per path.
+     *
+     * Counting the blocks is the only way to tell — the values would be identical either way, which is
+     * exactly how a second traversal would go unnoticed.
+     */
+    public function testSeveralPathsReadTheSourceOnlyOnce(): void
+    {
+        $items = [];
+        for ($index = 0; $index < 4000; $index++) {
+            $items[] = sprintf('{"id":%d,"pad":"%s"}', $index, str_repeat('p', 50));
+        }
+        $document = sprintf('{"users":[%s],"logs":[%s]}', implode(',', $items), implode(',', $items));
+
+        $together = new CountingJsonSource($document);
+        $seen = 0;
+        foreach ($this->reader->readPaths($together, ['users', 'logs']) as $ignored) {
+            $seen++;
+        }
+
+        $first = new CountingJsonSource($document);
+        $second = new CountingJsonSource($document);
+        foreach ($this->reader->readGenerator($first, keyPath: 'users') as $ignored) {
+        }
+        foreach ($this->reader->readGenerator($second, keyPath: 'logs') as $ignored) {
+        }
+
+        self::assertSame(8000, $seen);
+        self::assertLessThan(
+            $first->blocksRead + $second->blocksRead,
+            $together->blocksRead,
+            'reading two paths together cost as much as reading them separately',
+        );
     }
 
     public function testCountReturnsTotalForRootArray(): void
@@ -1473,26 +1771,74 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         $this->reader->read(__DIR__ . '/fixtures/invalid.json');
     }
 
-    public function testReadThrowsWhenRootIsNotArray(): void
+    /**
+     * A root object is streamed as `key => value`.
+     *
+     * `{"u1": {...}, "u2": {...}}` — a map keyed by id — is an ordinary export shape, and until this
+     * existed it could not be read at all: a key path had to end at an ARRAY, so a map of a hundred
+     * thousand entries had no way in. The KEY is the thing the caller came for, so it travels.
+     */
+    public function testARootObjectIsStreamedAsKeyAndValue(): void
     {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('root value must be an array');
+        $filePath = $this->writeTemporaryJson('{"u1":{"n":1},"u2":{"n":2},"u3":{"n":3}}');
 
-        $this->reader->read(__DIR__ . '/fixtures/object.json');
+        try {
+            $seen = [];
+            foreach ($this->reader->readGenerator($filePath) as $key => $value) {
+                $seen[$key] = $value;
+            }
+
+            self::assertSame(['u1' => ['n' => 1], 'u2' => ['n' => 2], 'u3' => ['n' => 3]], $seen);
+            self::assertSame(3, $this->reader->count($filePath));
+            self::assertSame(['n' => 1], $this->reader->getFirst($filePath));
+            self::assertSame(['n' => 3], $this->reader->getLast($filePath));
+
+            // Chunked, the keys stay with their values rather than being renumbered.
+            self::assertSame(
+                [['u1' => ['n' => 1], 'u2' => ['n' => 2]], ['u3' => ['n' => 3]]],
+                $this->reader->read($filePath, chunkSize: 2),
+            );
+        } finally {
+            @unlink($filePath);
+        }
     }
 
-    public function testReadThrowsRuntimeExceptionWhenResolvedKeyPathIsNotList(): void
+    /**
+     * The same, reached through a key path rather than at the root.
+     */
+    public function testAKeyPathMayLandOnAnObject(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('must point to a JSON array list');
+        $filePath = $this->writeTemporaryJson('{"wrap":{"a":1,"b":2},"other":[9]}');
 
-        $this->reader->read(
-            __DIR__ . '/fixtures/nested-non-list.json',
-            null,
-            null,
-            0,
-            'key1.key2.key3',
-        );
+        try {
+            self::assertSame(
+                ['a' => 1, 'b' => 2],
+                iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'wrap')),
+            );
+            self::assertSame(2, $this->reader->count($filePath, 'wrap'));
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A key path that lands on a single value is refused: there is nothing there to walk.
+     *
+     * It used to be refused for landing on anything that was not a list. An object is now a container
+     * like any other, so what is left is a path that ends at a string, a number or a boolean.
+     */
+    public function testAKeyPathLandingOnASingleValueIsRefused(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"key1":{"key2":{"key3":"a single string"}}}');
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('must point to a JSON array or object');
+
+            $this->reader->read($filePath, keyPath: 'key1.key2.key3');
+        } finally {
+            @unlink($filePath);
+        }
     }
 
     public function testReadThrowsRuntimeExceptionWhenWildcardPathIsNotFound(): void
