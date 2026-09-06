@@ -29,7 +29,7 @@ memory that does not grow with the file. It is paid for in time.
 | 1M | 103 MB | 496 ms | 714.0 MB | **out of memory** |
 | 5M | 528 MB | 2 897 ms | **3 661.5 MB** | **out of memory** |
 
-It needs about **6.9× the size of the file**, every time, and that ratio does not improve. Give PHP
+It needs about **7× the size of the file**, every time, and that ratio does not improve. Give PHP
 4 GB and it will read the 528 MB document in under three seconds. Give it the 512 MB that many
 deployments run with, and it stops at a file of roughly 70 MB.
 
@@ -103,18 +103,20 @@ minutes, over the same 528 MB file.
 **Read the last row across, not down.** Every streaming reader holds the same memory at ten thousand
 records as at five million — two of them wander by a hundredth of a megabyte between sizes, which is
 rounding, not growth. `json_decode()` has an arrow instead of a number, because its memory *is* the
-file: 6.9× of it, every time. That is the only difference in this table that changes what is
-possible, rather than what is quick.
+file: close to 7× of it, every time — between 6.9 and 7.2 at every size measured. That is the only
+difference in this table that changes what is possible, rather than what is quick.
 
 `json_decode()` is roughly **ten to twelve times faster** than this library at every size where it
 runs at all — 9.5× at ten thousand records, 12.6× at a hundred thousand, 10.3× at five million. It
 stops running at a file of roughly 70 MB under a 512 MB limit, and that is the whole reason the rest
 of this table exists.
 
-Among the streaming readers, `PhpJsonChunk` is the fastest at every size, by about 1.6× over the next
-one. It is **not** the thinnest: `crocodile2u` holds a fifteenth of the memory and three others hold a
-quarter of it. What 0.15 MB buys is a decoded PHP value per item and a key path to reach it; a parser
-that hands you events rather than values has less to keep.
+Among the streaming readers, `PhpJsonChunk` is the fastest at every size — 34% to 38% quicker than
+JsonMachine, the next one along, and by the same margin at ten thousand records as at five million.
+
+It is **not** the thinnest: `crocodile2u` holds a fifteenth of the memory and three others hold about
+a quarter of it. What 0.15 MB buys is a decoded PHP value per item and a key path to reach it; a
+parser that hands you events rather than values has less to keep.
 
 <sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
 elements without ever building one, so its time is a floor rather than a like-for-like measurement.

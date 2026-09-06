@@ -7,9 +7,9 @@
 [![Total Downloads](https://img.shields.io/packagist/dt/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 
 **Read a JSON file bigger than your memory limit, one item at a time.** Arrays or objects, at the root
-or anywhere inside. The fastest of the streaming readers compared here — **40% faster than
-JsonMachine** — and the only one of them whose conformance is checked against
-[JSONTestSuite](#conformance).
+or anywhere inside. The fastest of the streaming readers compared here — **a third faster than
+JsonMachine**, at every size from ten thousand records to five million — and the only one of them
+whose conformance is checked against [JSONTestSuite](#conformance).
 
 ```php
 $reader = new PhpJsonChunk\JsonChunkReader();
@@ -81,12 +81,13 @@ matters is the shape, not the milliseconds.
 times faster than this library at every size, and you should use it. Streaming buys one thing — memory that does not grow
 with the file — and it is paid for in time.
 
-The catch is that `json_decode()` needs about **6.9× the size of the file**. At five million records
+The catch is that `json_decode()` needs about **7× the size of the file**. At five million records
 (528 MB) it wants 3.7 GB and takes 2.9 s; `PhpJsonChunk` reads the same document at **0.15 MB** in
 29.7 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
 70 MB — and then the comparison between streaming readers is the only one left.
 
-Among those, this one is the fastest, by about 1.6× over the next. It is **not** the thinnest:
+Among those, this one is the fastest at every size measured — 34% to 38% quicker than JsonMachine,
+which is the next one along. It is **not** the thinnest:
 `crocodile2u` holds a fifteenth of the memory. What 0.15 MB buys is a decoded PHP value per item and
 a key path to reach it.
 
