@@ -529,6 +529,28 @@ Use `PhpJsonChunk` when you need to:
 - It is **not** a replacement for every JSON parser use-case
 - It is focused on **reading JSON arrays** from files, especially large ones
 
+## Conformance
+
+Checked against [JSONTestSuite](https://github.com/nst/JSONTestSuite), the corpus written to break
+JSON parsers — 318 files, of which 236 have a root array and are therefore something this reader is
+meant to read:
+
+| | files | agreeing with `json_decode()` |
+|---|---:|---:|
+| `y_` must be accepted | 75 | 75 |
+| `n_` must be rejected | 130 | 130 |
+| `i_` implementation-defined | 31 | 31 |
+
+Not one verdict differs from PHP's own parser, and nothing outside that scope — a root object, string
+or number — is accepted. The corpus is not vendored; re-run it yourself:
+
+```bash
+php bin/jsontestsuite.php                       # fetches the corpus into a temporary directory
+php bin/jsontestsuite.php --corpus=/path/to/JSONTestSuite/test_parsing
+```
+
+The script exits non-zero and names the files if any verdict disagrees.
+
 ## Test
 
 ```bash
