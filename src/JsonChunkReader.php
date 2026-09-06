@@ -272,6 +272,18 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function openFile(string $filePath): JsonStream
     {
+        // A stream wrapper is not a missing file, and saying "was not found" about `php://memory`
+        // sends the reader looking for something that was never supposed to exist. This reader seeks
+        // and re-reads within the file, which a wrapper does not generally support, so the answer is
+        // that it needs a path — not that the path is wrong. `file://` names a real file and is left
+        // to `is_file()` below, which accepts it.
+        if (preg_match('#^(?!file://)[a-zA-Z][a-zA-Z0-9+.\-]*://#', $filePath) === 1) {
+            throw new InvalidArgumentException(sprintf(
+                'JSON source "%s" is a stream wrapper; this reader needs a filesystem path.',
+                $filePath,
+            ));
+        }
+
         if (!is_file($filePath)) {
             throw new InvalidArgumentException(sprintf('JSON file "%s" was not found.', $filePath));
         }

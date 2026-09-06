@@ -20,6 +20,22 @@ Full benchmark results for `PhpJsonChunk` and comparable streaming libraries.
   - 10k, 30k, 50k, 100k -> median of 3 runs
   - 500k, 1,000,000 -> median of 2 runs
 
+### What each parser is asked to do
+
+Five of the six hand back a PHP value for every element, and the benchmark iterates all of them:
+`PhpJsonChunk`, `JsonMachine`, `JsonDecodeStream`, `JsonCollectionParser` and
+`crocodile2u/json-streamer`.
+
+**`salsify/json-streaming-parser` is not doing the same work.** It is a SAX-style parser: it reports
+events, and the benchmark's listener counts root-array elements without ever assembling one. Its
+number is therefore a floor — materialising the items would only add to it — and it should be read as
+"even without building anything, this is the time", not as a like-for-like comparison.
+
+One difference that turned out not to matter: `JsonMachine` yields `stdClass` by default where the
+others yield arrays. Re-measured with `ExtJsonDecoder(true)` so that it yields arrays too, 100k
+records took 1078 ms against 1053 ms with objects — a 2% difference, which is noise at this scale and
+does not explain the gap.
+
 ## 10,000 Records (Median of 3 Runs)
 
 | Rank | Parser | Time | Peak mem |

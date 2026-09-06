@@ -21,35 +21,6 @@ error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
  */
 final class RootArrayCountListener implements ListenerInterface
 {
-  /**
-   * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
-   */
-  function measureCrocodile2uJsonStreamer(string $filePath): array
-  {
-      return measureExecution(static function () use ($filePath): int {
-          $handle = fopen($filePath, 'rb');
-          if ($handle === false) {
-              throw new RuntimeException(sprintf('Unable to open benchmark file "%s".', $filePath));
-          }
-
-          try {
-              // crocodile2u/json-streamer expects root to be an array, no path needed
-              $streamer = new JsonStreamer($handle);
-              $total = 0;
-
-              foreach ($streamer as $item) {
-                  $total++;
-                  /** @phpstan-ignore-next-line */
-                  $_ = $item;
-              }
-
-              return $total;
-          } finally {
-              fclose($handle);
-          }
-      });
-  }
-
     private int $total = 0;
 
     /** @var array<int, string> */
@@ -497,7 +468,7 @@ function runBenchmark(int $runs, array $sizes): void
     }
 
     echo "Notes:\n";
-    echo "- All parsers read the same generated root-array JSON file and iterate items incrementally.\n";
+    echo "- All parsers read the same generated root-array JSON file and iterate items incrementally,\n  except Salsify: it is a SAX parser, and the listener here counts elements without building\n  them, so its time is a floor rather than a like-for-like measurement.\n";
     echo "- Benchmark results depend on hardware, PHP version, and OS. Prefer median values from multiple runs.\n";
 }
 

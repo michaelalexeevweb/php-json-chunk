@@ -93,7 +93,7 @@ php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.2.2
+composer require michaelalexeevweb/php-json-chunk:^1.2.3
 ```
 
 ## Quick start
@@ -163,6 +163,11 @@ $items = $reader->readGenerator(
 - wildcard traversal is supported via `*`, for example `key1.*.key2.*.key3`
 
 If the root JSON value is an object, you should point `keyPath` to a nested array list.
+
+`filePath` must be a path on the filesystem — a plain path or a `file://` URI. Stream wrappers
+(`php://`, `data://`, `http://`) are refused: this reader seeks and re-reads within the file, which a
+wrapper does not generally support. Anything that has to come from a wrapper should be written to a
+file first.
 
 ## API overview
 

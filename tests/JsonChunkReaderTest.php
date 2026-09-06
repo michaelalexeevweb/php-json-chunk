@@ -950,6 +950,101 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         }
     }
 
+    /**
+     * A stream wrapper is named as a stream wrapper, not reported as a missing file.
+     *
+     * This reader seeks and re-reads inside the file, which a wrapper does not generally support, so
+     * it needs a filesystem path. `is_file()` already refused one — but with `JSON file "php://memory"
+     * was not found.`, which sends the reader hunting for a file that was never meant to exist. The
+     * refusal is right; the reason was not.
+     *
+     * @param string $source a path this reader cannot read from
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('streamWrapperSources')]
+    public function testAStreamWrapperIsNamedAsTheCause(string $source): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('stream wrapper');
+
+        $this->reader->read($source);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function streamWrapperSources(): array
+    {
+        return [
+            'php://memory' => ['php://memory'],
+            'php://temp' => ['php://temp'],
+            'a data URI' => ['data://text/plain,[{"id":1}]'],
+            'an http URL' => ['http://127.0.0.1:9/none.json'],
+        ];
+    }
+
+    /**
+     * `file://` names a real file, so it is read like any other path.
+     *
+     * The other half of the rule above, and the half that would make it useless if it were wrong.
+     */
+    public function testAFileUriIsReadLikeAnyOtherPath(): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]');
+
+        try {
+            self::assertCount(2, $this->reader->read('file://' . $filePath)[0]);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A read that fails part way through leaves no temporary chunk files behind.
+     *
+     * Chunks are written to disk one at a time, so a document that parses for a while and then stops
+     * being valid has already littered the directory by the time it fails. Nothing drove that: the
+     * committed tests either read a good file to the end or abandoned one before a chunk was written.
+     */
+    public function testAFailedReadLeavesNoTemporaryChunksBehind(): void
+    {
+        $items = [];
+        for ($index = 0; $index < 2000; $index++) {
+            $items[] = sprintf('{"id":%d,"pad":"%s"}', $index, str_repeat('p', 100));
+        }
+
+        // Valid for two thousand items, then cut off inside a string.
+        $filePath = $this->writeTemporaryJson('[' . implode(',', $items) . ',{"id":2000,"pad":"cut off');
+        $temporaryDirectory = $this->workingDirectoryForChunks();
+
+        try {
+            try {
+                $this->reader->read($filePath, chunkSize: 100, tempChunkDir: $temporaryDirectory);
+                self::fail('the truncated document was expected to stop the read');
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('Invalid JSON', $exception->getMessage());
+            }
+
+            self::assertSame(
+                [],
+                (array)glob($temporaryDirectory . '/*'),
+                'a failed read left its temporary chunks on disk',
+            );
+        } finally {
+            array_map('unlink', (array)glob($temporaryDirectory . '/*'));
+            @rmdir($temporaryDirectory);
+            @unlink($filePath);
+        }
+    }
+
+    private function workingDirectoryForChunks(): string
+    {
+        $directory = (string)tempnam(sys_get_temp_dir(), 'pjc-chunks-');
+        @unlink($directory);
+        mkdir($directory, 0o775, true);
+
+        return $directory;
+    }
+
     public function testCountReturnsTotalForRootArray(): void
     {
         $count = $this->reader->count(__DIR__ . '/fixtures/sample-array.json');
