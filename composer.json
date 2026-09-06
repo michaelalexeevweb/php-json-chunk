@@ -1,19 +1,27 @@
 {
     "name": "michaelalexeevweb/php-json-chunk",
-    "description": "Memory-efficient PHP library for streaming large JSON arrays with chunked reads, generators, and iterators.",
+    "description": "Read large JSON files in PHP one item at a time — arrays or objects, in chunks, iterators or generators, without loading the file into memory.",
     "type": "library",
     "license": "MIT",
     "keywords": [
         "php",
         "json",
+        "json-chunk",
+        "json-chunks",
+        "chunk",
+        "chunked",
         "stream",
         "streaming",
         "json-streaming",
-        "json-chunk",
+        "json-stream",
+        "json-parser",
         "generator",
         "iterator",
         "memory-efficient",
-        "large-json"
+        "large-json",
+        "large-json-file",
+        "parse-large-json",
+        "json-decode"
     ],
     "require": {
         "php": ">=8.1"

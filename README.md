@@ -6,21 +6,49 @@
 [![PHP Version](https://img.shields.io/packagist/php-v/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 [![Total Downloads](https://img.shields.io/packagist/dt/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 
-Memory-efficient **and fast** JSON streaming for large files in PHP. Read large JSON arrays from files in chunks, iterators, or generators without loading the full file into memory — **40% faster than JSON Machine**.
+**Read a JSON file bigger than your memory limit, one item at a time.** Arrays or objects, at the root
+or anywhere inside. The fastest of the streaming readers compared here — **40% faster than
+JsonMachine** — and the only one of them whose conformance is checked against
+[JSONTestSuite](#conformance).
 
-Process large JSON files without running out of memory.
+```php
+$reader = new PhpJsonChunk\JsonChunkReader();
 
-`PhpJsonChunk` is a focused PHP library for streaming **JSON array data** from files. It helps you **stream large JSON files** and **process large JSON datasets** when `file_get_contents() + json_decode()` becomes too expensive for large files.
+foreach ($reader->readGenerator(__DIR__ . '/data.json', keyPath: 'data.0.items') as $item) {
+    echo $item['id'], PHP_EOL;
+}
+```
 
-## Why PhpJsonChunk?
+That is the whole idea, and it is meant literally: a **1.00 GB** file of 5 400 000 records reads to the
+end **under a 32 MB memory limit**, at a 4 MB peak, in 27.5 s. Memory follows the biggest single
+element, never the length of the file — see [what memory scales with](#what-memory-actually-scales-with).
 
-- ✅ Stream large JSON arrays in PHP
-- ✅ Stream large JSON files without loading the full file first
-- ✅ Read data item-by-item or chunk-by-chunk
-- ✅ Work with nested arrays via `keyPath`
-- ✅ Use generators and iterators for memory-friendly processing
-- ✅ Apply `limit` and `offset` without loading the full dataset first
-- ✅ Optionally spill chunks to temporary files for large workloads
+Everything below is detail.
+
+## Why this one
+
+**It is the fastest here.** 100 000 records, same file, same loop — 579.8 ms against JsonMachine's
+930.7 ms and 7 242 ms for the slowest in the set. The benchmark is in the repository; run it yourself
+with `php bin/benchmark.php`.
+
+**Its answers match PHP's own parser.** Checked against JSONTestSuite — the corpus written to break
+JSON parsers — over 289 documents it is meant to read. Not one verdict differs from `json_decode()`.
+No other library in this comparison publishes such a check. See [Conformance](#conformance).
+
+**The examples on this page run.** Every PHP block below is executed by the test suite, against a
+document synthesised from the very `keyPath` it uses. A README that drifts from the code fails the
+build.
+
+**It reads more than a list.** A root object streams as `key => value`; several key paths can be read
+in one pass; a key containing a dot is reachable; items come back as arrays or `stdClass`; a string or
+an open stream reads like a file; and a complaint names the byte it failed at.
+
+- ✅ Stream large JSON arrays **and objects** in PHP
+- ✅ Read item-by-item or chunk-by-chunk
+- ✅ Reach nested data via `keyPath`, with `*` for "every element"
+- ✅ Generators and iterators, so memory stays flat
+- ✅ `limit` and `offset` without loading the whole dataset
+- ✅ Optionally spill chunks to temporary files for very large workloads
 
 ## Why not `json_decode()`?
 
@@ -37,11 +65,18 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 | [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | ✅ **Low** | ✅ | **190.3 ms** ⚡ |
 | [`JsonMachine`](https://github.com/halaxa/json-machine) | ✅ Low | ✅ | 330.0 ms |
 | [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | ✅ **Minimal** | ✅ | 383.2 ms |
-| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | ✅ Low | ✅ | 980.2 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | ✅ Low | ✅ | 980.2 ms¹ |
 | [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | ✅ Low | ✅ | 1025.8 ms |
 | [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | ✅ Low | ✅ | 2585.6 ms |
 
-> Based on the benchmark below (median of 3 runs), `PhpJsonChunk` is the fastest incremental array reader in this comparison.
+<sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
+elements without ever building one, so its time is a floor rather than a like-for-like measurement.
+Every other row hands back a PHP value for each element, and the benchmark iterates all of them.</sub>
+
+**What travels is the ratio, not the milliseconds.** Those numbers are one machine on one day; yours
+will differ. Re-measured on 2026-09-06 on slower hardware, the same file and the same loop gave
+`PhpJsonChunk` 579.8 ms against JsonMachine's 930.7 ms — 1.6× — with the six libraries in exactly the
+order above. Run `php bin/benchmark.php` and see for yourself; that is why it ships in the repository.
 
 ## Performance
 
@@ -156,13 +191,15 @@ $items = $reader->readGenerator(
 
 ## What it reads
 
-`PhpJsonChunk` is designed for **JSON array lists**:
+`PhpJsonChunk` reads **containers** — a JSON array or a JSON object:
 
-- a root array like `[{"id":1},{"id":2}]`
-- or a nested array resolved by `keyPath`, like `data.0.items`
-- wildcard traversal is supported via `*`, for example `key1.*.key2.*.key3`
+- a root array like `[{"id":1},{"id":2}]`, streamed item by item
+- a root object like `{"u1":{...},"u2":{...}}`, streamed as `key => value`
+- anything nested, reached by `keyPath` — `data.0.items`, or `['a.b']` when a key contains a dot
+- `*` for "every element of this list": `key1.*.key2.*.key3`
 
-If the root JSON value is an object, you should point `keyPath` to a nested array list.
+A document that is a single string, number, boolean or `null` has nothing to stream, and is refused
+as such.
 
 ### What memory actually scales with
 
@@ -208,11 +245,76 @@ clear that a stream is what you meant.
 *(Earlier versions of this file said wrappers were refused because the reader "seeks and re-reads
 within the file". It never did. The restriction was `is_file()`, and it is gone.)*
 
+## What else it does
+
+### Objects, not only arrays
+
+A document keyed by id — `{"u1": {...}, "u2": {...}}` — streams as `key => value`:
+
+```php
+foreach ($reader->readGenerator(__DIR__ . '/users.json') as $id => $user) {
+    echo $id, ': ', $user['name'], PHP_EOL;
+}
+```
+
+A `keyPath` may land on an object as well as on an array. Chunked, the names stay with their values.
+
+### Key paths as segments
+
+`keyPath` takes a dotted string or a list of segments. The list form is how a key containing a dot is
+named — a domain, a version, `user.name`:
+
+```php
+$reader->read(__DIR__ . '/data.json', keyPath: 'data.0.items');   // the short form
+$reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key containing a dot
+```
+
+`'*'` means "every element of this list" in both forms.
+
+### Several paths in one pass
+
+```php
+foreach ($reader->readPaths(__DIR__ . '/data.json', ['users', 'logs']) as $path => $value) {
+    echo $path, ': ', json_encode($value), PHP_EOL;
+}
+```
+
+The document is read once, not once per path. The key is the path that matched, so a path matching
+many values appears many times.
+
+### Arrays or objects
+
+```php
+$reader = new JsonChunkReader(associative: false);   // items come back as stdClass
+```
+
+Object keys stay strings whatever this says: a key is a name, not a value.
+
+### Stopping early
+
+A `forEach()` callback that returns `false` stops the walk. Anything else — including nothing at all —
+carries on.
+
+```php
+$reader->forEach(__DIR__ . '/data.json', function (array $item): bool {
+    return $item['id'] < 1000;   // stop once the ids get big
+});
+```
+
+### When something is wrong
+
+Complaints name the byte they failed at, and it points at the START of the value that could not be
+read rather than wherever the scanner stopped:
+
+```
+Invalid JSON in file "data.json" at byte 30: Syntax error
+```
+
 ## API overview
 
 ### `count()`
 
-Returns the total number of elements in the target JSON array.
+Returns how many entries the target container holds — items of an array, or members of an object.
 
 ```php
 <?php
@@ -308,7 +410,7 @@ foreach ($generator as $chunk) {
 
 ### `getFirst()`
 
-Returns the first element in the target JSON array.
+Returns the first entry of the target container — an item of an array, or the value of an object's first member.
 
 ```php
 <?php
@@ -325,7 +427,7 @@ var_dump($first);
 
 ### `getLast()`
 
-Returns the last element in the target JSON array.
+Returns the last entry of the target container. Reading it means walking to the end, which is what streaming costs.
 
 ```php
 <?php
@@ -388,7 +490,7 @@ echo "Processed $total records\n";
 | `chunkSize` | Returns chunked arrays instead of single items |
 | `limit` | Maximum number of items to read |
 | `offset` | Number of items to skip before reading |
-| `keyPath` | Dot-separated path to a nested JSON array list |
+| `keyPath` | Dot-separated path, or a list of literal segments, to a nested array or object |
 | `tempChunkDir` | Optional directory for temporary chunk files |
 
 ## More usage examples
@@ -556,80 +658,18 @@ foreach ($names as $name) {
 
 Use `PhpJsonChunk` when you need to:
 
-- stream large JSON files in PHP
-- process JSON arrays with generators
+- stream large JSON files in PHP without loading them
+- process JSON arrays or objects with generators
 - read only a window of data via `limit` / `offset`
-- access a nested array list inside a larger JSON document
-- avoid loading the entire dataset into memory
+- reach a nested array or object inside a larger document
+- read several parts of one document in a single pass
+- keep memory flat regardless of how long the file is
 
 ## What this library is not
 
 - It is **not** a general-purpose JSON writer
-- It is **not** a replacement for every JSON parser use-case
-- It is focused on **reading JSON arrays** from files, especially large ones
-
-### Objects, not only arrays
-
-A document keyed by id — `{"u1": {...}, "u2": {...}}` — streams as `key => value`:
-
-```php
-foreach ($reader->readGenerator(__DIR__ . '/users.json') as $id => $user) {
-    echo $id, ': ', $user['name'], PHP_EOL;
-}
-```
-
-A `keyPath` may land on an object as well as on an array. Chunked, the names stay with their values.
-
-### Key paths as segments
-
-`keyPath` takes a dotted string or a list of segments. The list form is how a key containing a dot is
-named — a domain, a version, `user.name`:
-
-```php
-$reader->read(__DIR__ . '/data.json', keyPath: 'data.0.items');   // the short form
-$reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key containing a dot
-```
-
-`'*'` means "every element of this list" in both forms.
-
-### Several paths in one pass
-
-```php
-foreach ($reader->readPaths(__DIR__ . '/data.json', ['users', 'logs']) as $path => $value) {
-    echo $path, ': ', json_encode($value), PHP_EOL;
-}
-```
-
-The document is read once, not once per path. The key is the path that matched, so a path matching
-many values appears many times.
-
-### Arrays or objects
-
-```php
-$reader = new JsonChunkReader(associative: false);   // items come back as stdClass
-```
-
-Object keys stay strings whatever this says: a key is a name, not a value.
-
-### Stopping early
-
-A `forEach()` callback that returns `false` stops the walk. Anything else — including nothing at all —
-carries on.
-
-```php
-$reader->forEach(__DIR__ . '/data.json', function (array $item): bool {
-    return $item['id'] < 1000;   // stop once the ids get big
-});
-```
-
-### When something is wrong
-
-Complaints name the byte they failed at, and it points at the START of the value that could not be
-read rather than wherever the scanner stopped:
-
-```
-Invalid JSON in file "data.json" at byte 30: Syntax error
-```
+- It is **not** a validator you run for its own sake — it refuses malformed input as it reads
+- It is focused on **reading** large JSON documents, not on building them
 
 ## Conformance
 
