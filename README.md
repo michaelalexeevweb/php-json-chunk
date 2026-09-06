@@ -27,9 +27,10 @@ Everything below is detail.
 
 ## Why this one
 
-**It is the fastest here.** 100 000 records, same file, same loop — 579.8 ms against JsonMachine's
-930.7 ms and 7 242 ms for the slowest in the set. The benchmark is in the repository; run it yourself
-with `php bin/benchmark.php`.
+**It is the fastest of them.** 100 000 records, same file, same loop — 616 ms against JsonMachine's
+937 ms, and 7 252 ms for the slowest in the set; at five million records, 29.7 s against 47.7 s and
+371.9 s. Plain `json_decode()` is faster still when the file fits in memory, which is the honest first
+question and the [comparison](#comparison) answers it.
 
 **Its answers match PHP's own parser.** Checked against JSONTestSuite — the corpus written to break
 JSON parsers — over 289 documents it is meant to read. Not one verdict differs from `json_decode()`.
@@ -59,40 +60,48 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 
 ## Comparison
 
-| Approach | Memory usage | Streaming | Speed (100k records) |
-|---|---|---|---|
-| `json_decode()` | ❌ High | ❌ | — |
-| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | ✅ **Low** | ✅ | **190.3 ms** ⚡ |
-| [`JsonMachine`](https://github.com/halaxa/json-machine) | ✅ Low | ✅ | 330.0 ms |
-| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | ✅ **Minimal** | ✅ | 383.2 ms |
-| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | ✅ Low | ✅ | 980.2 ms¹ |
-| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | ✅ Low | ✅ | 1025.8 ms |
-| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | ✅ Low | ✅ | 2585.6 ms |
+100 000 records, a 10 MB file, the same loop over every item. One machine, 2026-09-06 — yours will
+differ, so what matters is the shape, not the milliseconds.
+
+| Approach | Peak memory | Streaming | Time |
+|---|---:|:--:|---:|
+| `json_decode()` on the whole file | 71.5 MB | ❌ | **49 ms** |
+| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | 0.15 MB | ✅ | **616 ms** |
+| [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 937 ms |
+| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 119 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.03 MB | ✅ | 2 982 ms¹ |
+| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.03 MB | ✅ | 3 047 ms |
+| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 252 ms |
+
+**Read the first row before the others.** If the file fits in memory, `json_decode()` beats every
+streaming reader here and you should use it. Streaming buys one thing — memory that does not grow
+with the file — and it is paid for in time.
+
+The catch is that `json_decode()` needs about **6.9× the size of the file**. At five million records
+(528 MB) it wants 3.7 GB and takes 2.9 s; `PhpJsonChunk` reads the same document at **0.15 MB** in
+29.7 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
+70 MB — and then the comparison between streaming readers is the only one left.
+
+Among those, this one is the fastest, by about 1.6× over the next. It is **not** the thinnest:
+`crocodile2u` holds a fifteenth of the memory. What 0.15 MB buys is a decoded PHP value per item and
+a key path to reach it.
 
 <sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
-elements without ever building one, so its time is a floor rather than a like-for-like measurement.
-Every other row hands back a PHP value for each element, and the benchmark iterates all of them.</sub>
-
-**What travels is the ratio, not the milliseconds.** Those numbers are one machine on one day; yours
-will differ. Re-measured on 2026-09-06 on slower hardware, the same file and the same loop gave
-`PhpJsonChunk` 579.8 ms against JsonMachine's 930.7 ms — 1.6× — with the six libraries in exactly the
-order above. Run `php bin/benchmark.php` and see for yourself; that is why it ships in the repository.
+elements without ever building one, so its time is a floor rather than a like-for-like measurement.</sub>
 
 ## Performance
 
-Quick snapshot for `100000` records (sorted by speed, faster -> slower):
+Ten thousand to five million records, with charts of how memory and time actually scale:
+**[BENCHMARKS.md](BENCHMARKS.md)**. The short version — memory is flat at 0.15 MB from 10 000 records
+to 5 000 000, and time is 5.9 ms per thousand records at every size measured.
 
-```
-Rank  Parser                     Time         Peak mem
-1     PhpJsonChunk               190.3 ms     0.15 MB
-2     JsonMachine                330.0 ms     0.31 MB
-3     Crocodile2uJsonStreamer    383.2 ms     0.01 MB
-4     Salsify                    980.2 ms     0.04 MB
-5     JsonCollectionParser      1025.8 ms     0.04 MB
-6     JsonDecodeStream          2585.6 ms     0.04 MB
+Run it yourself; that is why the benchmark ships in the repository:
+
+```bash
+php bin/benchmark.php --runs=2 --sizes=10000,50000,100000,500000,1000000,5000000
 ```
 
-Repositories:
+Compared against:
 
 - [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk)
 - [`JsonMachine`](https://github.com/halaxa/json-machine)
@@ -100,28 +109,6 @@ Repositories:
 - [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser)
 - [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser)
 - [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream)
-
-Full benchmark matrix: [`BENCHMARKS.md`](BENCHMARKS.md)
-
-Notes:
-
-- The other libraries above are compared on the same generated root-array file and iterate items incrementally.
-
-How to reproduce:
-
-```bash
-composer benchmark
-```
-
-This runs `bin/benchmark.php` and generates benchmark JSON data on the fly.
-
-You can also run with custom parameters:
-
-```bash
-php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
-```
-
-> Benchmark results depend on hardware, PHP version, and OS. Prefer median values from multiple runs.
 
 ## Install
 
