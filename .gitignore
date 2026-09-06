@@ -1,3 +1,5 @@
 .idea
 vendor
 .phpunit.cache
+test
+bin/read.php

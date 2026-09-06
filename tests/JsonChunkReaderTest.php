@@ -35,6 +35,545 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         );
     }
 
+    /**
+     * One reader, two reads in flight. A generator is lazy, so both are open at once.
+     *
+     * The block buffer used to be a field on the reader, which made this quietly wrong: items came
+     * back from the OTHER file, and the read then died reporting invalid JSON in a file that parses
+     * fine. Nothing in the API hints at it — the class is final and takes no constructor arguments,
+     * so a container hands out one instance and every caller shares it.
+     *
+     * Both halves are asserted: every item must come from its own file, and both generators must run
+     * to the end.
+     */
+    public function testTwoGeneratorsFromOneReaderDoNotShareState(): void
+    {
+        $first = $this->writeSourcedItems('a', 400);
+        $second = $this->writeSourcedItems('b', 400);
+
+        try {
+            $generatorA = $this->reader->readGenerator($first);
+            $generatorB = $this->reader->readGenerator($second);
+
+            $seen = 0;
+
+            while ($generatorA->valid() && $generatorB->valid()) {
+                $itemA = $generatorA->current();
+                $itemB = $generatorB->current();
+
+                self::assertIsArray($itemA);
+                self::assertIsArray($itemB);
+                self::assertSame('a', $itemA['src'] ?? null, 'the first generator read the other file');
+                self::assertSame('b', $itemB['src'] ?? null, 'the second generator read the other file');
+
+                $seen++;
+                $generatorA->next();
+                $generatorB->next();
+            }
+
+            self::assertSame(400, $seen);
+        } finally {
+            @unlink($first);
+            @unlink($second);
+        }
+    }
+
+    /**
+     * The same shared-buffer fault reached through an ordinary call: asking how big another file is,
+     * without leaving the loop. It used to end the iteration after six of four hundred items with an
+     * exception naming the file being iterated, which is not where the problem was.
+     */
+    public function testCallingCountDuringIterationDoesNotBreakTheGenerator(): void
+    {
+        $iterated = $this->writeSourcedItems('a', 400);
+        $other = $this->writeSourcedItems('b', 25);
+
+        try {
+            $seen = 0;
+
+            foreach ($this->reader->readGenerator($iterated) as $item) {
+                if ($seen === 5) {
+                    self::assertSame(25, $this->reader->count($other));
+                }
+
+                self::assertIsArray($item);
+                self::assertSame('a', $item['src'] ?? null);
+                $seen++;
+            }
+
+            self::assertSame(400, $seen);
+        } finally {
+            @unlink($iterated);
+            @unlink($other);
+        }
+    }
+
+    /**
+     * A file whose every item names the file it came from, so a value crossing between two reads
+     * shows up as the wrong name rather than as a count that happens to match.
+     */
+    private function writeSourcedItems(string $source, int $count): string
+    {
+        $items = [];
+        for ($index = 0; $index < $count; $index++) {
+            // Padding pushes the file past the 64 KB read block, which is where the two reads used to
+            // start overwriting one another.
+            $items[] = ['id' => $index, 'src' => $source, 'pad' => str_repeat($source, 200)];
+        }
+
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-src-');
+        file_put_contents($filePath, (string)json_encode($items));
+
+        return $filePath;
+    }
+
+    /**
+     * A wildcard path must not cost the file.
+     *
+     * `resolveWildcardValues()` used to `file_get_contents()` + `json_decode()` the whole document
+     * and hold every resolved value — on a 20 MB file the peak went from 2 MB to 162 MB, while the
+     * README promises reading "without loading the full file into memory" and shows `*` through
+     * `readGenerator()` with no exception.
+     *
+     * The bound is deliberately loose: what fails here is materialisation, which costs a multiple of
+     * the file, not the few hundred KB of ordinary buffering.
+     */
+    public function testWildcardKeyPathStreamsInsteadOfLoadingTheFile(): void
+    {
+        $filePath = $this->writeWildcardDocument(branches: 4, itemsPerBranch: 6000);
+
+        try {
+            $fileSizeMb = (int)filesize($filePath) / 1048576;
+            self::assertGreaterThan(8.0, $fileSizeMb, 'the fixture must be big enough for the difference to show');
+
+            $before = memory_get_peak_usage(true);
+
+            $seen = 0;
+            foreach ($this->reader->readGenerator($filePath, keyPath: 'groups.*.items') as $item) {
+                $seen++;
+            }
+
+            $growthMb = (memory_get_peak_usage(true) - $before) / 1048576;
+
+            self::assertSame(24000, $seen);
+            self::assertLessThan(
+                $fileSizeMb,
+                $growthMb,
+                sprintf('a wildcard read grew the peak by %.1f MB on a %.1f MB file', $growthMb, $fileSizeMb),
+            );
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * The same work spread over more branches must not cost more.
+     *
+     * Both documents hold the same number of items in about the same number of bytes; only the number
+     * of lists under the `*` differs. An implementation that resolves `*` by seeking each branch from
+     * the start of the file reads the whole document once per branch, and the two timings separate:
+     * measured at 24 000 items in a 5 MB file, one branch took 0.98 s and thirty-two took 15.2 s.
+     * Reading in a single pass makes the two the same, near enough.
+     *
+     * The bound is deliberately loose — this is a wall-clock measurement on whatever machine runs it,
+     * and what it has to catch is a factor of fifteen, not a factor of two.
+     */
+    public function testWildcardCostDoesNotGrowWithTheNumberOfBranches(): void
+    {
+        $few = $this->writeWildcardDocument(branches: 1, itemsPerBranch: 6000);
+        $many = $this->writeWildcardDocument(branches: 32, itemsPerBranch: 188);
+
+        try {
+            $elapsedFew = $this->timeWildcardRead($few);
+            $elapsedMany = $this->timeWildcardRead($many);
+
+            self::assertLessThan(
+                $elapsedFew * 5,
+                $elapsedMany,
+                sprintf(
+                    'spreading the same items over 32 branches took %.0f ms against %.0f ms for one, '
+                    . 'which is what re-seeking each branch from the start of the file looks like',
+                    $elapsedMany,
+                    $elapsedFew,
+                ),
+            );
+        } finally {
+            @unlink($few);
+            @unlink($many);
+        }
+    }
+
+    /**
+     * The best of three. A shared CI runner hiccups, and one hiccup on the wrong side of a ratio is
+     * the whole difference between a green build and a red one; the fastest run is the one least
+     * contaminated by whatever else the machine was doing.
+     */
+    private function timeWildcardRead(string $filePath): float
+    {
+        $best = INF;
+
+        for ($run = 0; $run < 3; $run++) {
+            $startedAt = hrtime(true);
+
+            foreach ($this->reader->readGenerator($filePath, keyPath: 'groups.*.items') as $ignored) {
+                // The cost being measured is the reading, so the loop body stays empty on purpose.
+            }
+
+            $best = min($best, (hrtime(true) - $startedAt) / 1e6);
+        }
+
+        return $best;
+    }
+
+    /**
+     * The README documents `data.*.name` yielding scalars, and nothing here drove it: every wildcard
+     * case in this file ends on a list. A leaf that is not a list is yielded whole.
+     */
+    public function testWildcardKeyPathYieldsScalarLeaves(): void
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-scalar-');
+        file_put_contents($filePath, '{"data":[{"name":"alpha"},{"name":"beta"},{"name":"gamma"}]}');
+
+        try {
+            $names = iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'data.*.name'), false);
+
+            self::assertSame(['alpha', 'beta', 'gamma'], $names);
+            self::assertSame(3, $this->reader->count($filePath, 'data.*.name'));
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A branch that does not carry the key contributes nothing rather than failing the whole read —
+     * the behaviour of walking the decoded arrays, which returned an empty list for a missing key.
+     */
+    public function testWildcardKeyPathSkipsBranchesWithoutTheKey(): void
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-partial-');
+        file_put_contents($filePath, '{"d":[{"x":[1]},{"other":true},{"x":[2,3]}]}');
+
+        try {
+            $values = iterator_to_array($this->reader->readGenerator($filePath, keyPath: 'd.*.x'), false);
+
+            self::assertSame([1, 2, 3], $values);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A document with several branches, each holding a list, and enough padding that materialising it
+     * cannot hide inside the allocator's existing arena.
+     */
+    private function writeWildcardDocument(int $branches, int $itemsPerBranch): string
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-wildcard-');
+        $handle = fopen($filePath, 'wb');
+        self::assertIsResource($handle);
+
+        fwrite($handle, '{"groups":[');
+        for ($branch = 0; $branch < $branches; $branch++) {
+            if ($branch > 0) {
+                fwrite($handle, ',');
+            }
+            fwrite($handle, '{"items":[');
+            for ($item = 0; $item < $itemsPerBranch; $item++) {
+                if ($item > 0) {
+                    fwrite($handle, ',');
+                }
+                fwrite($handle, (string)json_encode([
+                    'id' => $item,
+                    'branch' => $branch,
+                    'pad' => str_repeat('p', 380),
+                ]));
+            }
+            fwrite($handle, ']}');
+        }
+        fwrite($handle, ']}');
+        fclose($handle);
+
+        return $filePath;
+    }
+
+    /**
+     * A file that begins with a UTF-8 BOM is refused — `json_decode()` refuses one too — and the
+     * message says which byte is the problem.
+     *
+     * It used to say "The JSON root value must be an array." over a file whose root is an array,
+     * because the BOM was simply not the `[` the reader wanted. The byte is invisible in an editor and
+     * a Windows or spreadsheet export carries one routinely, so that message sent the reader looking
+     * at the wrong thing entirely. A wildcard path answered the same document with
+     * `Key path "*" was not found`, which is a third story about one file.
+     *
+     * @param string|null $keyPath the entry point under test — each reaches the first byte its own way
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('byteOrderMarkEntryPoints')]
+    public function testAByteOrderMarkIsNamedAsTheCause(string|null $keyPath): void
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-bom-');
+        // The root here IS a list under the mark, so nothing but the mark can be the complaint.
+        file_put_contents($filePath, "\xEF\xBB\xBF" . '{"items":[{"id":1}]}');
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('byte order mark');
+
+            $this->reader->read($filePath, keyPath: $keyPath);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string|null}>
+     */
+    public static function byteOrderMarkEntryPoints(): array
+    {
+        return [
+            'no key path' => [null],
+            'a plain key path' => ['items'],
+            'a wildcard key path' => ['items.*'],
+        ];
+    }
+
+    /**
+     * A root that is an object is not a dead end — it is the documented case for `keyPath`, and the
+     * message now says so instead of stopping at the verdict.
+     */
+    public function testANonArrayRootPointsAtKeyPath(): void
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-root-');
+        file_put_contents($filePath, '{"items":[{"id":1}]}');
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('keyPath');
+
+            $this->reader->read($filePath);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * A failure is reported by the exception and by nothing else.
+     *
+     * Two failure paths printed a PHP warning on the way to raising a perfectly clear exception: the
+     * `fopen()` on a file the process cannot read, and the `mkdir()` for a temporary chunk directory
+     * it cannot create. Under a web SAPI that text goes into the response body, ahead of whatever the
+     * application meant to send — and it says nothing the exception does not already say with the
+     * path in it.
+     *
+     * This runs in a SUBPROCESS on purpose. PHPUnit installs its own error handler, so inside the
+     * test run a raw warning never reaches the output and the assertion passes whether the library
+     * suppresses it or not — a test that cannot fail. Only a plain PHP process with `display_errors`
+     * on shows what an application would actually see.
+     */
+    public function testAFailingReadRaisesWithoutPrinting(): void
+    {
+        $blockedParent = (string)tempnam(sys_get_temp_dir(), 'pjc-blocked-');
+        @unlink($blockedParent);
+        mkdir($blockedParent, 0o500, true);
+
+        $source = (string)tempnam(sys_get_temp_dir(), 'pjc-warn-');
+        file_put_contents($source, '[{"id":1},{"id":2}]');
+
+        $script = sprintf(
+            'require %s; try { (new \PhpJsonChunk\JsonChunkReader())'
+            . '->read(%s, chunkSize: 1, tempChunkDir: %s); } catch (\Throwable $e) { echo "THREW"; }',
+            var_export(dirname(__DIR__) . '/vendor/autoload.php', true),
+            var_export($source, true),
+            var_export($blockedParent . '/sub', true),
+        );
+
+        try {
+            $output = (string)shell_exec(sprintf(
+                '%s -d display_errors=1 -d error_reporting=E_ALL -r %s 2>&1',
+                escapeshellarg(PHP_BINARY),
+                escapeshellarg($script),
+            ));
+
+            self::assertStringContainsString('THREW', $output, 'the read was expected to raise');
+            self::assertStringNotContainsString(
+                'Warning',
+                $output,
+                'the read printed a PHP warning on its way to throwing: ' . trim($output),
+            );
+        } finally {
+            chmod($blockedParent, 0o755);
+            @rmdir($blockedParent);
+            @unlink($source);
+        }
+    }
+
+    /**
+     * A root array is the whole document, so anything after it means the file is not what it claims.
+     *
+     * The reader stopped at the closing bracket and never looked past it, so `[{"id":1}] whatever`
+     * and `[{"id":1}]]` both came back as `[{"id":1}]` with no error. `json_decode()` refuses both,
+     * and so does `file_get_contents() + json_decode()` — the pair this library stands in for. A file
+     * that is two documents concatenated, or one truncated and then appended to, read as just the
+     * first with nothing to say it had been cut.
+     *
+     * @param string $trailing what follows the array
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('trailingContent')]
+    public function testContentAfterTheRootArrayIsRefused(string $trailing): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]' . $trailing);
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('after the root array ended');
+
+            $this->reader->read($filePath);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function trailingContent(): array
+    {
+        return [
+            'a stray word' => [' whatever'],
+            'an extra bracket' => [']'],
+            'a second document' => ['[{"id":3}]'],
+            'an object' => ['{"a":1}'],
+        ];
+    }
+
+    /**
+     * The other half of the rule, and the half that would make it useless if it were wrong: a file
+     * ending in a newline, or in the spaces an editor left behind, is ordinary and must still read.
+     *
+     * @param string $trailing whitespace that must be ignored
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('trailingWhitespace')]
+    public function testWhitespaceAfterTheRootArrayIsFine(string $trailing): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]' . $trailing);
+
+        try {
+            self::assertCount(2, $this->reader->read($filePath)[0]);
+            self::assertSame(2, $this->reader->count($filePath));
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function trailingWhitespace(): array
+    {
+        return [
+            'nothing at all' => [''],
+            'a newline' => ["\n"],
+            'spaces and tabs' => ["  \t\n  "],
+        ];
+    }
+
+    /**
+     * A `limit` that stops early leaves the rest of the array unread, so there is nothing to say
+     * about what follows it. Reporting trailing content here would refuse a perfectly good file for
+     * the crime of not being read to the end.
+     */
+    public function testALimitThatStopsEarlyIsNotMistakenForTrailingContent(): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2},{"id":3}]');
+
+        try {
+            self::assertCount(1, $this->reader->read($filePath, limit: 1)[0]);
+            self::assertCount(3, $this->reader->read($filePath, limit: 99)[0]);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * With a `keyPath` the target array is nested, and the rest of the document follows it by design.
+     * Checking there would mean reading the whole file, which is the cost this library exists to
+     * avoid — so the rule stops at the root, and this pins that boundary.
+     */
+    public function testAKeyPathReadIgnoresWhatFollowsItsArray(): void
+    {
+        $filePath = $this->writeTemporaryJson('{"items":[{"id":1}],"after":{"x":1},"more":[1,2]}');
+
+        try {
+            self::assertCount(1, $this->reader->read($filePath, keyPath: 'items')[0]);
+            self::assertCount(2, $this->reader->read($filePath, keyPath: 'more')[0]);
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    private function writeTemporaryJson(string $content): string
+    {
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-json-');
+        file_put_contents($filePath, $content);
+
+        return $filePath;
+    }
+
+    /**
+     * An argument the reader will not accept is refused AT THE CALL, from every entry point.
+     *
+     * `readGenerator()` was a generator function, and a generator function runs no part of its body
+     * until the first iteration — so the two asserts written at the top of it read as a guard and
+     * never fired when it was called. `readGenerator($file, chunkSize: 0)` handed back a Generator,
+     * and the invalid chunk size surfaced later, wherever the caller happened to start iterating,
+     * which for a generator handed to another layer is a long way from the mistake.
+     *
+     * `readIterator()` beside it refused the same call immediately. Two entry points disagreeing
+     * about when the same argument is wrong is what says one of them was not doing what it looked
+     * like it was doing.
+     *
+     * The assertion is on the CALL alone: nothing here iterates, because iterating is what used to
+     * hide the difference.
+     *
+     * @param array{0: int|null, 1: int|null, 2: int} $arguments chunkSize, limit, offset
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('invalidReadArguments')]
+    public function testEveryEntryPointRefusesAnInvalidArgumentAtTheCall(array $arguments): void
+    {
+        $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]');
+        [$chunkSize, $limit, $offset] = $arguments;
+
+        try {
+            foreach (['read', 'readIterator', 'readGenerator'] as $method) {
+                $refused = false;
+
+                try {
+                    $this->reader->{$method}($filePath, $chunkSize, $limit, $offset);
+                } catch (InvalidArgumentException) {
+                    $refused = true;
+                }
+
+                self::assertTrue($refused, sprintf('%s() accepted the call and deferred the complaint', $method));
+            }
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    /**
+     * @return array<string, array{0: array{0: int|null, 1: int|null, 2: int}}>
+     */
+    public static function invalidReadArguments(): array
+    {
+        return [
+            'chunk size of zero' => [[0, null, 0]],
+            'negative chunk size' => [[-1, null, 0]],
+            'limit of zero' => [[null, 0, 0]],
+            'negative limit' => [[null, -5, 0]],
+            'negative offset' => [[null, null, -1]],
+        ];
+    }
+
     public function testCountReturnsTotalForRootArray(): void
     {
         $count = $this->reader->count(__DIR__ . '/fixtures/sample-array.json');

@@ -93,7 +93,7 @@ php bin/benchmark.php --runs=5 --sizes=10000,50000,100000
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.1.2
+composer require michaelalexeevweb/php-json-chunk:^1.2.1
 ```
 
 ## Quick start
@@ -357,7 +357,12 @@ declare(strict_types=1);
 use PhpJsonChunk\JsonChunkReader;
 
 $reader = new JsonChunkReader();
-$filePath = __DIR__ . '/data.json';
+
+// Two documents, because they are shaped differently: a keyPath of null needs a file whose ROOT is
+// an array, and a nested keyPath needs one whose root is an object. One file cannot be both.
+$filePath = __DIR__ . '/data.json';            // [{"id": 1}, {"id": 2}, ...]
+$nestedFilePath = __DIR__ . '/nested.json';    // {"key1": [{"key2": [{"key3": [...]}]}]}
+$namesFilePath = __DIR__ . '/names.json';      // {"data": [{"name": "Alice"}, {"name": "Bob"}]}
 
 // Returns total number of items in target array
 $total = $reader->count(
@@ -386,7 +391,7 @@ $chunks = $reader->read(
 
 // Read from nested key path (example: key1.0.key2.0.key3)
 $nested = $reader->read(
-    filePath: $filePath,
+    filePath: $nestedFilePath,
     chunkSize: null,
     limit: null,
     offset: 0,
@@ -416,7 +421,7 @@ $windowWithTempChunks = $reader->read(
 
 // Total stays independent from limit/offset
 $totalNested = $reader->count(
-    filePath: $filePath,
+    filePath: $nestedFilePath,
     keyPath: 'key1.0.key2.0.key3',
 );
 
@@ -468,7 +473,7 @@ $generatorWithTempChunks = $reader->readGenerator(
 
 // Iterator from nested key path with limit/offset
 $iteratorNested = $reader->readIterator(
-    filePath: $filePath,
+    filePath: $nestedFilePath,
     chunkSize: null,
     limit: 10,
     offset: 0,
@@ -483,7 +488,7 @@ foreach ($iteratorNested as $item) {
 // JSON: {"key1":[{"key2":[{"key3":[1,2]},{"key3":[3,4]}]},{"key2":[{"key3":[5]}]}]}
 // keyPath "key1.*.key2.*.key3" will collect all key3 arrays and stream their items
 $wildcardGenerator = $reader->readGenerator(
-    filePath: $filePath,
+    filePath: $nestedFilePath,
     keyPath: 'key1.*.key2.*.key3',
 );
 foreach ($wildcardGenerator as $item) {
@@ -494,7 +499,7 @@ foreach ($wildcardGenerator as $item) {
 // JSON: {"data":[{"name":"Alice"},{"name":"Bob"}]}
 // keyPath "data.*.name" yields "Alice", "Bob"
 $names = $reader->readGenerator(
-    filePath: $filePath,
+    filePath: $namesFilePath,
     limit: 10,
     keyPath: 'data.*.name',
 );
