@@ -1045,6 +1045,66 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         return $directory;
     }
 
+    /**
+     * Memory follows the biggest ELEMENT, not the file — and the README says so with numbers.
+     *
+     * An element is scanned into a string and then decoded, so both are alive at once and the peak
+     * lands at roughly twice that element. A file of ordinary records reads at a flat few megabytes
+     * however long it is; a file that is one enormous record does not, and the difference is worth
+     * stating rather than discovering in production.
+     *
+     * The bound here is deliberately loose. What it has to catch is a regression to memory that
+     * follows the FILE — the ratio, not the constant.
+     */
+    public function testMemoryFollowsTheBiggestElementRatherThanTheFile(): void
+    {
+        $elementMb = 4;
+        $filePath = (string)tempnam(sys_get_temp_dir(), 'pjc-bigitem-');
+
+        $handle = fopen($filePath, 'wb');
+        self::assertIsResource($handle);
+        fwrite($handle, '[{"pad":"');
+        for ($written = 0; $written < $elementMb; $written++) {
+            fwrite($handle, str_repeat('z', 1048576));
+        }
+        // A long tail of small elements after the big one. It has to be long enough that holding
+        // them all would cost more than the big element does — otherwise the assertion below passes
+        // whether the read streams or not, which is the trap this fixture was written into once.
+        fwrite($handle, '"}');
+        for ($index = 0; $index < 150000; $index++) {
+            fwrite($handle, sprintf(',{"id":%d,"name":"row-%d"}', $index, $index));
+        }
+        fwrite($handle, ']');
+        fclose($handle);
+
+        try {
+            $before = memory_get_peak_usage(true);
+
+            $seen = 0;
+            $longest = 0;
+            foreach ($this->reader->readGenerator($filePath) as $item) {
+                $seen++;
+                if (is_array($item) && is_string($item['pad'] ?? null)) {
+                    $longest = max($longest, strlen($item['pad']));
+                }
+            }
+
+            $growthMb = (memory_get_peak_usage(true) - $before) / 1048576;
+            $fileMb = (int)filesize($filePath) / 1048576;
+
+            self::assertSame(150001, $seen);
+            self::assertSame($elementMb * 1048576, $longest, 'the big element came back truncated');
+
+            self::assertLessThan(
+                $elementMb * 6,
+                $growthMb,
+                sprintf('a %.1f MB file with a %d MB element grew the peak by %.1f MB', $fileMb, $elementMb, $growthMb),
+            );
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
     public function testCountReturnsTotalForRootArray(): void
     {
         $count = $this->reader->count(__DIR__ . '/fixtures/sample-array.json');

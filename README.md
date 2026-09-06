@@ -164,6 +164,21 @@ $items = $reader->readGenerator(
 
 If the root JSON value is an object, you should point `keyPath` to a nested array list.
 
+### What memory actually scales with
+
+Not the file — the largest single element. An element is scanned into a string and then decoded, and
+both are alive at once, so the peak lands at roughly twice the size of the biggest item in the array:
+
+| biggest element | file | peak growth |
+|---:|---:|---:|
+| 1 MB | 1 MB | 2 MB |
+| 8 MB | 8 MB | 16 MB |
+| 32 MB | 32 MB | 64 MB |
+
+A 20 MB file of ordinary records reads at a 4 MB peak; a 20 MB file that is one enormous record does
+not. This is a property of reading a JSON array element at a time, not a limit you can raise — if your
+elements are that big, they are the unit that has to fit in memory.
+
 `filePath` must be a path on the filesystem — a plain path or a `file://` URI. Stream wrappers
 (`php://`, `data://`, `http://`) are refused: this reader seeks and re-reads within the file, which a
 wrapper does not generally support. Anything that has to come from a wrapper should be written to a
