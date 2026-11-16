@@ -1,0 +1,123 @@
+# Changelog
+
+Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
+[GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
+
+## 1.4.0 — 2026-11-16
+
+Six bugs found by testing the reader against `json_decode()` on generated documents, and a skip that is twice as fast. **Read the first section before upgrading** — two of the fixes change what existing code gets back.
+
+### Breaking
+
+**A path ending in `*` hands each element over as it is.** `items.*` used to walk every element that happened to be a list: `[[1,2],{"x":1},[]]` came back as `1, 2, {"x":1}` — the inner lists flattened, the empty one gone, and `count()` with them. It now gives `[1,2]`, `{"x":1}`, `[]`, the same values as `items`. A path that ends in a named segment (`groups.*.items`) still streams the list it lands on.
+
+**`read()` without `chunkSize` keeps an object's names.** `{"a":1,"b":2}` came back as `[[1, 2]]`; it is now `[['a' => 1, 'b' => 2]]`, as a chunked read and `readGenerator()` always gave.
+
+### Fixed
+
+- **A deeply nested branch on the way to the target no longer kills PHP.** Skipping it recursed once per level, and about 20 000 levels ended the process with a segmentation fault — no exception to catch, at a depth anyone controlling the document could choose. The skip is iterative now.
+- **`tempChunkDir` reads objects.** Any object container failed with `Temporary chunk file ... must contain a JSON array list`.
+- **`tempChunkDir` changes nothing about the values.** `3.0` and `1e3` came back as the ints `3` and `1000`; a name like `"10"` came back as the index `0`.
+- **`readPaths()` with paths inside one another** — `a` and `a.0.b` — reported the inner one missing.
+- **`readPaths()` no longer treats `*` as a member named `"*"`**, which `readGenerator()` never did.
+- **The empty key is reachable** through the list form: `['', 'items']`. The dotted form still refuses `a..b`.
+- Temporary chunk files are removed whatever stops the read, not only on the library's own exceptions.
+
+### Faster
+
+Skipping a branch on the way to the target scans strings and numbers a block at a time instead of a character at a time. On an 18 MB document whose target sits after everything else:
+
+| | 1.3.0 | 1.4.0 | JsonMachine |
+|---|---:|---:|---:|
+| `keyPath` after the skipped data | 6160 ms | **2852 ms** | 4289 ms |
+| wildcard `groups.*.items.*.id` | 5937 ms | **3460 ms** | 7134 ms |
+| `readPaths()` | 5834 ms | **2809 ms** | — |
+
+Reading a root array is unchanged: 100 000 records in about 615 ms.
+
+### Tests
+
+141 tests, line coverage 70% → 94%. A differential test reads 450 generated documents — nested three to six levels, paths three to five segments with wildcards, bytes handed over one to five at a time — and compares every API with `json_decode()`; each of the bugs above fails it on 1.3.0.
+
+## 1.3.0 — 2026-09-06
+
+Seven capabilities the comparable libraries had and this one did not. **Read the first section before upgrading** — three of these change what existing code does.
+
+### Breaking
+
+**A `forEach()` callback that returns `false` now stops the walk.** This is the sharp one: it is silent. A callback that happened to return `false` for its own reasons — the last line of a `foo() && bar()`, an early `return false` meaning "skipped this one" — used to be ignored and now ends the read. Only a strict `false` stops; `null`, `0` and `''` carry on as before.
+
+**A root object is read instead of refused.** `{"u1": {...}, "u2": {...}}` used to raise `The JSON root value must be an array`; it now streams. Code that caught that exception to detect "this is not a list" will no longer see it. The same applies to a `keyPath` landing on an object. What is still refused is a root that is a single string, number, boolean or null.
+
+**Error messages changed shape** — they now carry a byte offset. Anything matching on the exact text will need adjusting.
+
+Implementations of `JsonChunkReaderInterface` other than the shipped one will need updating: the signatures widened and `readPaths()` was added.
+
+### Complaints say where
+
+```
+Invalid JSON in file "data.json" at byte 30: Syntax error
+```
+
+The offset points at the START of the value that could not be read, not at wherever the scanner stopped — by the time `json_decode()` refuses an element, the stream has run past its end. Checked against JsonMachine's own positions on the same documents.
+
+### Objects, not only arrays
+
+A document keyed by id streams as `key => value`, at the root or through a `keyPath`. Chunked, the names stay with their values. This widened the JSONTestSuite audit from 236 in-scope files to 289 — with no verdict differing from `json_decode()`.
+
+### Key paths as segments
+
+`keyPath: ['a.b']` names one key that contains a dot — a domain, a version, `user.name`. The dotted string form could not reach it at all. `'*'` still means "every element of this list" in both forms.
+
+### Several paths in one pass
+
+```php
+foreach ($reader->readPaths($file, ['users', 'logs']) as $path => $value) { ... }
+```
+
+Two paths used to mean two reads. Measured by counting the blocks the source is asked for: 44 for the two together, 66 for them separately.
+
+### Arrays or objects
+
+```php
+new JsonChunkReader(associative: false);   // items come back as stdClass
+```
+
+The shape survives the detour through `tempChunkDir`. Object keys stay strings whatever this says.
+
+### A string or an open stream
+
+```php
+$reader->read(new StringSource($payload, 'the upload'), keyPath: 'items');
+$reader->read(new StreamSource(fopen('php://input', 'rb')), keyPath: 'items');
+```
+
+The reader never seeks, so a source that can be read once is enough. Earlier versions of the README said wrappers were refused because the reader "seeks and re-reads within the file" — it never did, and that sentence is gone.
+
+### Unchanged
+
+Reading well-formed files: JSONTestSuite still shows no verdict differing from `json_decode()` across 289 containers, and a full read of a 10 MB file takes ~479 ms at a 4 MB peak — slightly faster than 1.2.3.
+
+122 tests, up from 103.
+
+## 1.2.3 — 2026-09-06
+
+- a stream wrapper is named as the cause
+- the benchmark says what each parser is asked to do
+- a stray function left the listener class
+
+## 1.2.2 — 2026-09-06
+
+- windowing lives in one place
+- wildcard chunking is covered
+- a numeric segment after a wildcard is covered
+
+## 1.2.1 — 2026-09-06
+
+- reader no longer shares its read buffer
+- wildcard streams in a single pass
+- a byte order mark is named as the cause
+- failures raise without printing
+- content after the root array is refused
+- invalid arguments are refused at the call
+- every README example is executed by a test

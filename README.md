@@ -123,6 +123,8 @@ Compared against:
 composer require michaelalexeevweb/php-json-chunk:^1.4.0
 ```
 
+Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
+
 ## Quick start
 
 Stream a large JSON array in chunks:
