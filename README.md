@@ -120,7 +120,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.3.0
+composer require michaelalexeevweb/php-json-chunk:^1.4.0
 ```
 
 ## Quick start
@@ -189,6 +189,9 @@ $items = $reader->readGenerator(
 - a root object like `{"u1":{...},"u2":{...}}`, streamed as `key => value`
 - anything nested, reached by `keyPath` — `data.0.items`, or `['a.b']` when a key contains a dot
 - `*` for "every element of this list": `key1.*.key2.*.key3`
+
+A path that lands on a list streams its items; one that ends in `*` hands each element over as it is,
+so `items.*` gives the same values as `items`. An object reached through a wildcard comes whole.
 
 A document that is a single string, number, boolean or `null` has nothing to stream, and is refused
 as such.
@@ -261,7 +264,8 @@ $reader->read(__DIR__ . '/data.json', keyPath: 'data.0.items');   // the short f
 $reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key containing a dot
 ```
 
-`'*'` means "every element of this list" in both forms.
+`'*'` means "every element of this list" in both forms — never a member named `"*"`. The list form
+also reaches a key that is the empty string: `['', 'items']`.
 
 ### Several paths in one pass
 

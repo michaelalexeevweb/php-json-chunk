@@ -13,7 +13,9 @@ use PhpJsonChunk\Internal\JsonStream;
 use RuntimeException;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\Source\FileSource;
+use PhpJsonChunk\Source\StringSource;
 use SplFileObject;
+use Throwable;
 
 final class JsonChunkReader implements JsonChunkReaderInterface
 {
@@ -32,6 +34,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     private const DEFAULT_TEMP_CHUNK_SIZE = 1000;
+
+    /**
+     * An item read at json_decode()'s own 512 levels sits two deeper in a chunk file — the list of
+     * pairs, and the pair — so the file is written and read with room for both.
+     */
+    private const TEMP_CHUNK_DEPTH = 514;
 
     /**
      * @throws InvalidArgumentException
@@ -65,7 +73,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * @return array<int, array<int, mixed>>
+     * @return array<int, array<int|string, mixed>> a chunk of a list is a list; an object's keeps its names
      *
      * @throws InvalidArgumentException
      * @throws RuntimeException
@@ -83,17 +91,29 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $this->assertChunkSize($chunkSize);
         $this->assertLimitAndOffset($limit, $offset);
 
-        $result = [];
+        if ($chunkSize !== null) {
+            $chunks = [];
+            foreach ($this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir) as $chunk) {
+                $chunks[] = $chunk;
+            }
 
-        foreach ($this->readGenerator($filePath, $chunkSize, $limit, $offset, $keyPath, $tempChunkDir) as $item) {
-            $result[] = $item;
+            return $chunks;
         }
 
-        if ($chunkSize === null) {
-            return [$result];
+        // An object's items keep their names — chunked reads always did, and an unchunked one returned
+        // the values alone, so the same object read two ways answered two different shapes. An object
+        // yields its names as strings, `"10"` included; a list yields int indices, which a window would
+        // leave starting at the offset: dropped.
+        $items = [];
+        foreach ($this->readGenerator($filePath, null, $limit, $offset, $keyPath, $tempChunkDir) as $key => $item) {
+            if (is_string($key)) {
+                $items[$key] = $item;
+            } else {
+                $items[] = $item;
+            }
         }
 
-        return $result;
+        return [$items];
     }
 
     /**
@@ -244,26 +264,47 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $tempChunkDir,
     ): array {
         $resolvedTempChunkDir = $this->prepareTempChunkDirectory($tempChunkDir);
-        $streamChunkSize = $chunkSize ?? self::DEFAULT_TEMP_CHUNK_SIZE;
         $chunkFiles = [];
 
         try {
+            // Item by item, the pairs are the keys the stream yields — an object's names as the
+            // strings they are, `"10"` included. Chunked, a chunk's own keys are what a chunk holds.
+            $pairs = [];
             foreach (
                 $this->readGeneratorWithoutTemporaryChunks(
                     filePath: $filePath,
-                    chunkSize: $streamChunkSize,
+                    chunkSize: $chunkSize,
                     limit: $limit,
                     offset: $offset,
                     keyPath: $keyPath,
-                ) as $chunk
+                ) as $key => $value
             ) {
-                if (!is_array($chunk)) {
+                if ($chunkSize === null) {
+                    $pairs[] = [$key, $value];
+                    if (count($pairs) >= self::DEFAULT_TEMP_CHUNK_SIZE) {
+                        $chunkFiles[] = $this->writeTemporaryChunk($resolvedTempChunkDir, $pairs);
+                        $pairs = [];
+                    }
+
+                    continue;
+                }
+
+                if (!is_array($value)) {
                     throw new RuntimeException('Temporary chunk serialization expects an array chunk.');
                 }
 
-                $chunkFiles[] = $this->writeTemporaryChunk($resolvedTempChunkDir, $chunk);
+                $chunkPairs = [];
+                foreach ($value as $chunkKey => $item) {
+                    $chunkPairs[] = [$chunkKey, $item];
+                }
+                $chunkFiles[] = $this->writeTemporaryChunk($resolvedTempChunkDir, $chunkPairs);
             }
-        } catch (RuntimeException|InvalidArgumentException $exception) {
+
+            if ($pairs !== []) {
+                $chunkFiles[] = $this->writeTemporaryChunk($resolvedTempChunkDir, $pairs);
+            }
+        } catch (Throwable $exception) {
+            // Whatever stopped the read, the chunks written so far belong to nobody now.
             foreach ($chunkFiles as $chunkFile) {
                 $this->removeFileIfExists($chunkFile);
             }
@@ -285,14 +326,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     {
         try {
             foreach ($chunkFiles as $chunkFile) {
-                $chunk = $this->readTemporaryChunk($chunkFile);
+                $pairs = $this->readTemporaryChunk($chunkFile);
 
                 if ($yieldItems) {
-                    foreach ($chunk as $item) {
-                        yield $item;
+                    foreach ($pairs as [$key, $item]) {
+                        yield $key => $item;
                     }
 
                     continue;
+                }
+
+                $chunk = [];
+                foreach ($pairs as [$key, $item]) {
+                    $chunk[$key] = $item;
                 }
 
                 yield $chunk;
@@ -581,7 +627,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $valueOffset = $stream->offset() - 1;
 
             // Hot path: use block-buffer scanners (strcspn at C level) instead of
-            // per-character readValueAsJson + string concatenation.
+            // reading it a character at a time and concatenating.
             $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
             try {
@@ -962,7 +1008,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 throw new InvalidArgumentException('Key path segments must be strings.');
             }
 
-            if ($segment === '') {
+            // `a..b` is a typo in the dotted form. In the list form every segment is taken literally,
+            // and `""` is a key JSON allows — refusing it left such a member out of reach entirely.
+            if ($segment === '' && !is_array($keyPath)) {
                 throw new InvalidArgumentException('Key path must not contain empty segments.');
             }
         }
@@ -1003,6 +1051,17 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return '[' . implode(', ', array_map(static fn(string $s): string => '"' . $s . '"', $keyPath)) . ']';
+    }
+
+    /**
+     * Whether a list the path ends on is streamed item by item. It is — `users` gives the users — unless
+     * the path ends in `*`: that leaf is one element of a list, handed over as it is.
+     *
+     * @param array<int, string> $segments
+     */
+    private function walksLeafList(array $segments): bool
+    {
+        return $segments === [] || $segments[count($segments) - 1] !== '*';
     }
 
     /**
@@ -1270,7 +1329,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $matched[$cursor['label']] = true;
             }
 
-            if ($firstChar === '[' && count($arrived) === 1 && $active === []) {
+            if ($firstChar === '[' && count($arrived) === 1 && $active === [] && $this->walksLeafList($arrived[0]['segments'])) {
                 $label = $arrived[0]['label'];
                 foreach ($this->streamArrayValues($stream, $filePath) as $item) {
                     yield $label => $item;
@@ -1279,10 +1338,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 return;
             }
 
-            $value = $this->decodeScannedValue($this->scanValue($stream, $firstChar, $filePath), $filePath, $stream);
+            $raw = $this->scanValue($stream, $firstChar, $filePath);
+            $value = $this->decodeScannedValue($raw, $filePath, $stream);
 
             foreach ($arrived as $cursor) {
-                if (is_array($value) && array_is_list($value) && $firstChar === '[') {
+                if (is_array($value) && $firstChar === '[' && $this->walksLeafList($cursor['segments'])) {
                     foreach ($value as $item) {
                         yield $cursor['label'] => $item;
                     }
@@ -1291,6 +1351,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 }
 
                 yield $cursor['label'] => $value;
+            }
+
+            // Paths that go on below this node — `a` and `a.0.b` together — were dropped here: the
+            // value is consumed once, and they never saw it, so a path plainly in the document was
+            // reported missing. They walk the scanned copy instead of the stream.
+            if ($active !== []) {
+                $copy = new JsonStream(new StringSource($raw, $filePath));
+                try {
+                    $copyFirst = $this->readNonWhitespaceChar($copy);
+                    if ($copyFirst !== null) {
+                        yield from $this->walkCursors($copy, $copyFirst, $active, $filePath, $matched);
+                    }
+                } finally {
+                    $copy->close();
+                }
             }
 
             return;
@@ -1364,7 +1439,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $wanted = [];
             foreach ($cursors as $cursor) {
-                if ($cursor['segments'][$cursor['depth']] === $key) {
+                // `*` means every element of a LIST, here as in readGenerator(): on an object it matches
+                // nothing — not a member that happens to be named "*".
+                $segment = $cursor['segments'][$cursor['depth']];
+                if ($segment !== '*' && $segment === $key) {
                     $cursor['depth']++;
                     $wanted[] = $cursor;
                 }
@@ -1486,7 +1564,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // A LIST leaf is walked. An object leaf is handed over WHOLE: walking it would drop the
             // member names — `{"k":1}` would arrive as `1` — and under a wildcard the leaf is the
             // value being collected, not a container the caller asked to stream.
-            if ($firstChar === '[') {
+            //
+            // Not when the path ENDS in `*`: then the leaf is one element of the list, and it is
+            // handed over as it is. Walking it made `a.*` flatten every element that happened to be a
+            // list — `[[1,2],{"x":1},[]]` came back as `1, 2, {"x":1}` — so `a.*` and `a` disagreed,
+            // and an empty list vanished from both the values and the count.
+            if ($firstChar === '[' && $this->walksLeafList($segments)) {
                 yield from $this->streamArrayValues($stream, $filePath);
 
                 return;
@@ -1743,127 +1826,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     /**
      * @throws InvalidArgumentException
      */
-    private function readValueAsJson(JsonStream $stream, string $firstChar, string $filePath): string
-    {
-        return match ($firstChar) {
-            '{' => $this->readObjectAsJson($stream, $filePath),
-            '[' => $this->readArrayAsJson($stream, $filePath),
-            '"' => $this->readStringToken($stream, $filePath),
-            default => $this->readPrimitiveToken($stream, $firstChar),
-        };
-    }
-
-    /**
-     * @throws InvalidArgumentException
-     */
-    private function readObjectAsJson(JsonStream $stream, string|null $filePath): string
-    {
-        $pairs = [];
-        $next = $this->readNonWhitespaceChar($stream);
-
-        if ($next === '}') {
-            return '{}';
-        }
-
-        if ($next === null) {
-            throw new InvalidArgumentException(
-                $this->invalidJsonMessage($filePath, 'unexpected end of input in object.'),
-            );
-        }
-
-        $stream->pushBack($next);
-
-        while (true) {
-            $keyFirst = $this->readNonWhitespaceChar($stream);
-            if ($keyFirst !== '"') {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'object key must be a string.'),
-                );
-            }
-
-            $key = $this->readStringToken($stream, $filePath);
-
-            $separator = $this->readNonWhitespaceChar($stream);
-            if ($separator !== ':') {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'expected ":" after object key.'),
-                );
-            }
-
-            $valueFirst = $this->readNonWhitespaceChar($stream);
-            if ($valueFirst === null) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'unexpected end of input in object value.'),
-                );
-            }
-
-            $pairs[] = $key . ':' . $this->readValueAsJson($stream, $valueFirst, $filePath ?? '');
-
-            $delimiter = $this->readNonWhitespaceChar($stream);
-            if ($delimiter === '}') {
-                break;
-            }
-
-            if ($delimiter !== ',') {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.'),
-                );
-            }
-        }
-
-        return '{' . implode(',', $pairs) . '}';
-    }
-
-    /**
-     * @throws InvalidArgumentException
-     */
-    private function readArrayAsJson(JsonStream $stream, string|null $filePath): string
-    {
-        $items = [];
-        $next = $this->readNonWhitespaceChar($stream);
-
-        if ($next === ']') {
-            return '[]';
-        }
-
-        if ($next === null) {
-            throw new InvalidArgumentException(
-                $this->invalidJsonMessage($filePath, 'unexpected end of input in array.'),
-            );
-        }
-
-        $stream->pushBack($next);
-
-        while (true) {
-            $valueFirst = $this->readNonWhitespaceChar($stream);
-            if ($valueFirst === null) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'unexpected end of input in array value.'),
-                );
-            }
-
-            $items[] = $this->readValueAsJson($stream, $valueFirst, $filePath ?? '');
-
-            $delimiter = $this->readNonWhitespaceChar($stream);
-            if ($delimiter === ']') {
-                break;
-            }
-
-            if ($delimiter !== ',') {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'expected "," or "]" in array.'),
-                );
-            }
-        }
-
-        return '[' . implode(',', $items) . ']';
-    }
-
-    /**
-     * @throws InvalidArgumentException
-     */
     private function readStringToken(JsonStream $stream, string|null $filePath): string
     {
+        // With nothing pushed back, the rest of the string is in the block buffer, where strcspn() walks
+        // it at C level. A character at a time cost a method call per byte — on every key of every
+        // object a path walks past.
+        if ($stream->charBuffer === []) {
+            return '"' . $this->scanStringRemainder($stream, $filePath ?? '');
+        }
+
         $token = '"';
         $escaped = false;
 
@@ -1919,104 +1890,195 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         return $token;
     }
 
+    /**
+     * Consumes one value without keeping it — a branch the key path does not go down.
+     *
+     * Iterative on purpose, with the open containers on a stack of its own. It used to call itself
+     * once per nesting level, so a skipped branch of twenty thousand `[` — forty kilobytes — ran the
+     * PHP process out of C stack and killed it with a segmentation fault: no exception, no message, and
+     * whoever controls the document controls when that happens.
+     */
     private function skipValue(JsonStream $stream, string $firstChar, string|null $filePath): void
     {
-        if ($firstChar === '"') {
-            $this->readStringToken($stream, $filePath);
-            return;
-        }
+        // Everything below reads the block buffer directly — `strspn()` over whitespace, `strcspn()`
+        // over a string or a number — instead of a method call per character: a skipped branch is
+        // most of the document a path read goes through, and the calls were most of its time.
+        $stream->absorbPushBack();
 
-        if ($firstChar === '{') {
-            $next = $this->readNonWhitespaceChar($stream);
-            if ($next === '}') {
-                return;
+        /** @var array<int, string> $open the containers entered and not yet closed, `{` or `[` */
+        $open = [];
+        $char = $firstChar;
+
+        while (true) {
+            if ($char === '{' || $char === '[') {
+                $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+                $next = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+                if ($next === null) {
+                    throw new InvalidArgumentException($this->invalidJsonMessage(
+                        $filePath,
+                        $char === '{' ? 'unexpected end of input in object.' : 'unexpected end of input in array.',
+                    ));
+                }
+
+                if ($next !== ($char === '{' ? '}' : ']')) {
+                    $open[] = $char;
+                    $char = $char === '{' ? $this->skipObjectKey($stream, $next, $filePath) : $next;
+
+                    continue;
+                }
+            } elseif ($char === '"') {
+                // A string with no escape that ends inside this block — nearly all of them — is one
+                // strcspn(); anything else takes the general path.
+                $quote = $stream->bufPos + strcspn($stream->buf, '\\"', $stream->bufPos);
+                if ($quote < $stream->bufLen && $stream->buf[$quote] === '"') {
+                    $stream->bufPos = $quote + 1;
+                } else {
+                    $this->skipStringRemainder($stream, $filePath);
+                }
+            } else {
+                $stream->bufPos += strcspn($stream->buf, ",]} \t\n\r\v\f", $stream->bufPos);
+                if ($stream->bufPos >= $stream->bufLen) {
+                    $this->skipPrimitive($stream, $char);
+                }
             }
 
-            if ($next === null) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'unexpected end of input in object.'),
-                );
-            }
-
-            $stream->pushBack($next);
-
+            // A value is finished: close every container that ends right after it, and stop at the
+            // first one that carries on.
             while (true) {
-                $keyFirst = $this->readNonWhitespaceChar($stream);
-                if ($keyFirst !== '"') {
-                    throw new InvalidArgumentException(
-                        $this->invalidJsonMessage($filePath, 'object key must be a string.'),
-                    );
-                }
-
-                $this->readStringToken($stream, $filePath);
-
-                $separator = $this->readNonWhitespaceChar($stream);
-                if ($separator !== ':') {
-                    throw new InvalidArgumentException(
-                        $this->invalidJsonMessage($filePath, 'expected ":" after object key.'),
-                    );
-                }
-
-                $valueFirst = $this->readNonWhitespaceChar($stream);
-                if ($valueFirst === null) {
-                    throw new InvalidArgumentException(
-                        $this->invalidJsonMessage($filePath, 'unexpected end of input in object value.'),
-                    );
-                }
-
-                $this->skipValue($stream, $valueFirst, $filePath);
-
-                $delimiter = $this->readNonWhitespaceChar($stream);
-                if ($delimiter === '}') {
+                if ($open === []) {
                     return;
                 }
 
-                if ($delimiter !== ',') {
-                    throw new InvalidArgumentException(
-                        $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.'),
-                    );
+                $container = $open[count($open) - 1];
+                $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+                $delimiter = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+                if ($delimiter === ($container === '{' ? '}' : ']')) {
+                    array_pop($open);
+
+                    continue;
                 }
-            }
-        }
 
-        if ($firstChar === '[') {
-            $next = $this->readNonWhitespaceChar($stream);
-            if ($next === ']') {
-                return;
-            }
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException($this->invalidJsonMessage(
+                        $filePath,
+                        $container === '{' ? 'expected "," or "}" in object.' : 'expected "," or "]" in array.',
+                    ));
+                }
 
-            if ($next === null) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'unexpected end of input in array.'),
-                );
-            }
-
-            $stream->pushBack($next);
-
-            while (true) {
-                $valueFirst = $this->readNonWhitespaceChar($stream);
-                if ($valueFirst === null) {
+                $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+                $next = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+                if ($container === '{') {
+                    $char = $this->skipObjectKey($stream, $next, $filePath);
+                } elseif ($next === null) {
                     throw new InvalidArgumentException(
                         $this->invalidJsonMessage($filePath, 'unexpected end of input in array value.'),
                     );
+                } else {
+                    $char = $next;
                 }
 
-                $this->skipValue($stream, $valueFirst, $filePath);
-
-                $delimiter = $this->readNonWhitespaceChar($stream);
-                if ($delimiter === ']') {
-                    return;
-                }
-
-                if ($delimiter !== ',') {
-                    throw new InvalidArgumentException(
-                        $this->invalidJsonMessage($filePath, 'expected "," or "]" in array.'),
-                    );
-                }
+                break;
             }
         }
+    }
 
-        $this->readPrimitiveToken($stream, $firstChar);
+    /**
+     * An object member's `"key":`, read and dropped; returns the first character of its value.
+     */
+    private function skipObjectKey(JsonStream $stream, string|null $keyFirst, string|null $filePath): string
+    {
+        if ($keyFirst !== '"') {
+            throw new InvalidArgumentException($this->invalidJsonMessage($filePath, 'object key must be a string.'));
+        }
+
+        $quote = $stream->bufPos + strcspn($stream->buf, '\\"', $stream->bufPos);
+        if ($quote < $stream->bufLen && $stream->buf[$quote] === '"') {
+            $stream->bufPos = $quote + 1;
+        } else {
+            $this->skipStringRemainder($stream, $filePath);
+        }
+
+        $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+        $separator = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+        if ($separator !== ':') {
+            throw new InvalidArgumentException($this->invalidJsonMessage($filePath, 'expected ":" after object key.'));
+        }
+
+        $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+        $valueFirst = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+        if ($valueFirst === null) {
+            throw new InvalidArgumentException(
+                $this->invalidJsonMessage($filePath, 'unexpected end of input in object value.'),
+            );
+        }
+
+        return $valueFirst;
+    }
+
+    /**
+     * The rest of a string the skip does not keep, from the byte after its opening `"`: the buffer is
+     * walked with strcspn() and nothing is copied. A skipped branch is most of what a path read sees, so
+     * this is where its time goes.
+     */
+    private function skipStringRemainder(JsonStream $stream, string|null $filePath): void
+    {
+        if ($stream->charBuffer !== []) {
+            $this->readStringToken($stream, $filePath);
+
+            return;
+        }
+
+        while (true) {
+            if ($stream->bufPos >= $stream->bufLen) {
+                $this->refillBuffer($stream, $filePath, 'unexpected end of input in string.');
+            }
+
+            $special = $stream->bufPos + strcspn($stream->buf, '\\"', $stream->bufPos);
+            if ($special >= $stream->bufLen) {
+                $stream->bufPos = $stream->bufLen;
+
+                continue;
+            }
+
+            $stream->bufPos = $special + 1;
+            if ($stream->buf[$special] === '"') {
+                return;
+            }
+
+            // A backslash: the byte after it is escaped, whatever it is — `\"` does not end the string.
+            if ($stream->bufPos >= $stream->bufLen) {
+                $this->refillBuffer($stream, $filePath, 'unexpected end of input in string.');
+            }
+            $stream->bufPos++;
+        }
+    }
+
+    /**
+     * A number, `true`, `false` or `null` the skip does not keep, up to the delimiter after it, which
+     * is left unread. The delimiters are readPrimitiveToken()'s: JSON's own and the rest of ctype_space().
+     */
+    private function skipPrimitive(JsonStream $stream, string $firstChar): void
+    {
+        if ($stream->charBuffer !== []) {
+            $this->readPrimitiveToken($stream, $firstChar);
+
+            return;
+        }
+
+        while (true) {
+            if ($stream->bufPos >= $stream->bufLen) {
+                $chunk = $stream->readBlock();
+                if ($chunk === null) {
+                    return;
+                }
+                $stream->adopt($chunk);
+            }
+
+            $stream->bufPos += strcspn($stream->buf, ",]} \t\n\r\v\f", $stream->bufPos);
+            if ($stream->bufPos < $stream->bufLen) {
+                return;
+            }
+        }
     }
 
     private function readNonWhitespaceChar(JsonStream $stream): string|null
@@ -2127,19 +2189,23 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * @param array<int, mixed> $chunk
+     * @param array<int, array{0: int|string, 1: mixed}> $pairs
      *
      * @throws RuntimeException
      */
-    private function writeTemporaryChunk(string $tempChunkDir, array $chunk): string
+    private function writeTemporaryChunk(string $tempChunkDir, array $pairs): string
     {
         $tempFilePath = tempnam($tempChunkDir, 'json_chunk_');
         if ($tempFilePath === false) {
             throw new RuntimeException(sprintf('Unable to create temporary chunk file in "%s".', $tempChunkDir));
         }
 
+        // Written as `[key, value]` pairs: a JSON object would turn an object's numeric names into a
+        // list's indices on the way back and lose their order, and a plain list would lose the names
+        // outright — which is what made `tempChunkDir` refuse every object. JSON_PRESERVE_ZERO_FRACTION
+        // because `3.0` written as `3` comes back an int, and the read must not depend on the detour.
         try {
-            $encodedChunk = json_encode($chunk, JSON_THROW_ON_ERROR);
+            $encodedChunk = json_encode($pairs, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION, self::TEMP_CHUNK_DEPTH);
         } catch (JsonException $exception) {
             $this->removeFileIfExists($tempFilePath);
 
@@ -2158,7 +2224,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
 
     /**
-     * @return array<int, mixed>
+     * @return array<int, array{0: int|string, 1: mixed}> the `[key, value]` pairs, keys as written
      *
      * @throws RuntimeException
      */
@@ -2172,7 +2238,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         try {
             // The same flag the items were produced with: a chunk written from `stdClass` items and read
         // back as arrays would make `tempChunkDir` quietly change what a read returns.
-        $decodedChunk = json_decode($content, $this->associative, 512, JSON_THROW_ON_ERROR);
+        $decodedChunk = json_decode($content, $this->associative, self::TEMP_CHUNK_DEPTH, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
             throw new RuntimeException(sprintf('Invalid temporary chunk file "%s".', $chunkFile), 0, $exception);
         }
@@ -2183,7 +2249,23 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             );
         }
 
-        return $decodedChunk;
+        $pairs = [];
+        foreach ($decodedChunk as $pair) {
+            if (
+                !is_array($pair)
+                || count($pair) !== 2
+                || !array_key_exists(0, $pair)
+                || !array_key_exists(1, $pair)
+                || !(is_int($pair[0]) || is_string($pair[0]))
+            ) {
+                throw new RuntimeException(
+                    sprintf('Temporary chunk file "%s" must contain [key, value] pairs.', $chunkFile),
+                );
+            }
+            $pairs[] = [$pair[0], $pair[1]];
+        }
+
+        return $pairs;
     }
 
     private function removeFileIfExists(string $filePath): void

@@ -75,23 +75,6 @@ final class JsonStream
     }
 
     /**
-     * Reads the next block straight into the buffer. Returns false at end of file, so the caller
-     * decides whether that is the end of a value or a truncated document.
-     */
-    public function fillBuffer(): bool
-    {
-        $chunk = $this->readBlock();
-
-        if ($chunk === null) {
-            return false;
-        }
-
-        $this->adopt($chunk);
-
-        return true;
-    }
-
-    /**
      * Takes a freshly read block as the current buffer, starting at $startPos.
      *
      * The one place the buffer is replaced, so the one place that has to remember how much of the
@@ -114,6 +97,24 @@ final class JsonStream
     public function offset(): int
     {
         return $this->bytesBeforeBuffer + $this->bufPos - count($this->charBuffer);
+    }
+
+    /**
+     * Puts the pushed-back characters back in front of the block buffer, so a scanner that walks the
+     * buffer directly sees them where they were. The byte offset is unchanged.
+     */
+    public function absorbPushBack(): void
+    {
+        if ($this->charBuffer === []) {
+            return;
+        }
+
+        $offset = $this->offset();
+        $this->buf = implode('', array_reverse($this->charBuffer)) . substr($this->buf, $this->bufPos);
+        $this->bufLen = strlen($this->buf);
+        $this->bufPos = 0;
+        $this->bytesBeforeBuffer = $offset;
+        $this->charBuffer = [];
     }
 
     public function pushBack(string $char): void

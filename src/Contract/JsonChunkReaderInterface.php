@@ -25,7 +25,7 @@ interface JsonChunkReaderInterface
     /**
      * Reads a JSON file and returns data split into chunks.
      *
-     * @return array<int, array<int, mixed>>
+     * @return array<int, array<int|string, mixed>> a chunk of a list is a list; an object's keeps its names
      *
      * @throws InvalidArgumentException
      * @throws RuntimeException
