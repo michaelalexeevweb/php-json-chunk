@@ -1004,6 +1004,13 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
             'php://temp' => ['php://temp'],
             'a data URI' => ['data://text/plain,[{"id":1}]'],
             'an http URL' => ['http://127.0.0.1:9/none.json'],
+            // PHP finds a wrapper whatever case its scheme is written in, so the refusal must too.
+            'an upper-case https URL' => ['HTTPS://127.0.0.1:9/none.json'],
+            'a mixed-case phar URI' => ['pHaR://archive.phar/none.json'],
+            // `data:` is the one scheme PHP opens without `//`; `is_file()` refused it only because
+            // the data wrapper cannot stat, which is not a guarantee to lean on.
+            'a data URI without slashes' => ['data:text/plain,[{"id":1}]'],
+            'an upper-case data URI without slashes' => ['DATA:,[{"id":1}]'],
         ];
     }
 
@@ -1011,16 +1018,30 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
      * `file://` names a real file, so it is read like any other path.
      *
      * The other half of the rule above, and the half that would make it useless if it were wrong.
+     * The scheme is matched in any case, as PHP itself matches it.
      */
-    public function testAFileUriIsReadLikeAnyOtherPath(): void
+    #[DataProvider('fileUriSchemes')]
+    public function testAFileUriIsReadLikeAnyOtherPath(string $scheme): void
     {
         $filePath = $this->writeTemporaryJson('[{"id":1},{"id":2}]');
 
         try {
-            self::assertCount(2, $this->reader->read('file://' . $filePath)[0]);
+            self::assertCount(2, $this->reader->read($scheme . $filePath)[0]);
         } finally {
             @unlink($filePath);
         }
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function fileUriSchemes(): array
+    {
+        return [
+            'lower case' => ['file://'],
+            'upper case' => ['FILE://'],
+            'mixed case' => ['FiLe://'],
+        ];
     }
 
     /**

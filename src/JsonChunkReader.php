@@ -42,6 +42,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private const TEMP_CHUNK_DEPTH = 514;
 
     /**
+     * Walking a path recurses once per segment, and a few thousand of them end the process with a
+     * segmentation fault — nothing to catch. A path often comes from a request, so it is capped at
+     * json_decode()'s own depth: nothing deeper could have been read by the pair this library
+     * stands in for either.
+     */
+    private const MAX_KEY_PATH_SEGMENTS = 512;
+
+    /**
      * @throws InvalidArgumentException
      * @throws RuntimeException
      *
@@ -365,8 +373,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // sends the reader looking for something that was never supposed to exist. A wrapper CAN be
         // read — pass it as a `StreamSource` and it is — but a bare string of one is ambiguous enough
         // to be worth refusing out loud. `file://` names a real file and is left to `is_file()`
-        // below, which accepts it.
-        if (preg_match('#^(?!file://)[a-zA-Z][a-zA-Z0-9+.\-]*://#', $filePath) === 1) {
+        // below, which accepts it. PHP finds a wrapper whatever case its scheme is in, so the match
+        // ignores case too — `FILE://` is a file, `PHAR://` is a wrapper. `data:` is the one scheme
+        // PHP opens without `//`; `is_file()` turned it away only because the data wrapper cannot
+        // stat, and that is not a guarantee worth leaning on.
+        if (preg_match('#^(?:(?!file://)[a-z][a-z0-9+.\-]*://|data:)#i', $filePath) === 1) {
             throw new InvalidArgumentException(sprintf(
                 'JSON source "%s" is a stream wrapper; this reader needs a filesystem path.',
                 $filePath,
@@ -1002,6 +1013,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private function splitAndValidateKeyPath(string|array $keyPath): array
     {
         $segments = is_array($keyPath) ? array_values($keyPath) : explode('.', $keyPath);
+
+        if (count($segments) > self::MAX_KEY_PATH_SEGMENTS) {
+            throw new InvalidArgumentException(sprintf(
+                'Key path must have at most %d segments, %d given.',
+                self::MAX_KEY_PATH_SEGMENTS,
+                count($segments),
+            ));
+        }
 
         foreach ($segments as $segment) {
             if (!is_string($segment)) {

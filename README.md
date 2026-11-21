@@ -120,7 +120,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.4.0
+composer require michaelalexeevweb/php-json-chunk:^1.4.1
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -194,6 +194,9 @@ $items = $reader->readGenerator(
 
 A path that lands on a list streams its items; one that ends in `*` hands each element over as it is,
 so `items.*` gives the same values as `items`. An object reached through a wildcard comes whole.
+
+A path has at most 512 segments, json_decode()'s own depth limit; a longer one is refused with an
+`InvalidArgumentException`.
 
 A document that is a single string, number, boolean or `null` has nothing to stream, and is refused
 as such.

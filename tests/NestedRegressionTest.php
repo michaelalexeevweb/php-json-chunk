@@ -312,6 +312,44 @@ final class NestedRegressionTest extends TestCase
     }
 
     /**
+     * Walking a key path recursed once per segment, and a path of about 7 000 segments ended the
+     * process with a segmentation fault — the same crash a deep skipped branch once caused, only
+     * here the depth came from the path. A path is often built from a request, so it is refused
+     * past json_decode()'s own 512 levels, while 512 itself still reads.
+     */
+    public function testAKeyPathDeeperThanJsonDecodeAllowsIsRefusedNotCrashedOn(): void
+    {
+        $document = str_repeat('{"a":', 512) . '[1,2]' . str_repeat('}', 512);
+        $deepest = implode('.', array_fill(0, 512, 'a'));
+
+        self::assertSame([1, 2], iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: $deepest)));
+        self::assertSame([1, 2], iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: array_fill(0, 512, 'a'))));
+        self::assertSame(2, $this->reader->count(new StringSource($document), $deepest));
+        self::assertSame(1, $this->reader->getFirst(new StringSource($document), $deepest));
+        self::assertSame([1, 2], iterator_to_array($this->reader->readPaths(new StringSource($document), [$deepest]), false));
+
+        foreach ([513, 10000] as $segmentCount) {
+            $tooDeep = implode('.', array_fill(0, $segmentCount, 'a'));
+            $reads = [
+                'dotted' => fn() => iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: $tooDeep)),
+                'list' => fn() => iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: array_fill(0, $segmentCount, 'a'))),
+                'wildcard' => fn() => iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: $tooDeep . '.*')),
+                'count' => fn() => $this->reader->count(new StringSource($document), $tooDeep),
+                'readPaths' => fn() => iterator_to_array($this->reader->readPaths(new StringSource($document), ['a', $tooDeep]), false),
+            ];
+
+            foreach ($reads as $name => $read) {
+                try {
+                    $read();
+                    self::fail(sprintf('%d segments, %s: no exception.', $segmentCount, $name));
+                } catch (InvalidArgumentException $exception) {
+                    self::assertStringContainsString('at most 512 segments', $exception->getMessage(), $name);
+                }
+            }
+        }
+    }
+
+    /**
      * readPaths() yields in document order; this puts the pairs in the order the paths were asked for,
      * keeping each path's own values in document order.
      *

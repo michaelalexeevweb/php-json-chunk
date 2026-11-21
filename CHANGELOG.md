@@ -3,6 +3,14 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.4.1 — 2026-11-22
+
+### Fixed
+
+- **A key path with thousands of segments no longer kills PHP.** Walking a path recursed once per segment, and about 7 000 segments ended the process with a segmentation fault — no exception to catch, at a length anyone who builds the path from a request could choose. A path now has at most 512 segments, `json_decode()`'s own depth; a longer one throws `InvalidArgumentException`.
+- **`FILE://` and `FiLe://` are read like `file://`.** The stream-wrapper check matched other schemes in any case but this exception to it only in lower case, so an upper-case `file://` was refused as a wrapper.
+- **`data:` without `//` is refused as a stream wrapper.** PHP opens `data:text/plain,...` as a data URI; it used to be turned away only because `is_file()` cannot stat one, and was reported as a missing file.
+
 ## 1.4.0 — 2026-11-16
 
 Six bugs found by testing the reader against `json_decode()` on generated documents, and a skip that is twice as fast. **Read the first section before upgrading** — two of the fixes change what existing code gets back.
