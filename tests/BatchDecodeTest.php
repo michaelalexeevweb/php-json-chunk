@@ -122,6 +122,63 @@ final class BatchDecodeTest extends TestCase
         self::assertSame(array_column($records, 'n'), iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document), keyPath: '*.n'), false));
     }
 
+    /**
+     * An object's members are decoded a run at a time too. json_decode() keeps one value for a
+     * repeated key where the stream hands over each, so a run that holds one is read a member at a
+     * time; these runs hide one in the middle, among the other traps.
+     *
+     * @return iterable<string, array{0: callable(int): string, 1: string|null}>
+     */
+    public static function memberRunTraps(): iterable
+    {
+        yield 'a repeated key at the top' => [static fn(int $i): string => $i === 25 ? '"k24":{"again":1}' : '"k' . $i . '":{"v":' . $i . '}', null];
+        yield 'a repeated key inside a value' => [static fn(int $i): string => '"k' . $i . '":' . ($i === 25 ? '{"v":1,"v":2}' : '{"v":' . $i . '}'), null];
+        yield 'a key spelled with an escape' => [static fn(int $i): string => $i === 25 ? '"k\u0032\u0034":{"esc":1}' : '"k' . $i . '":{"v":' . $i . '}', null];
+        yield 'the pair inside strings' => [static fn(int $i): string => '"k' . $i . '":{"s":"},{\\"x\\":1},"}', null];
+        yield 'under a wildcard, a repeated key at the top' => [static fn(int $i): string => $i === 25 ? '"k24":{"v":"again"}' : '"k' . $i . '":{"v":' . $i . '}', '*.v'];
+        yield 'under a wildcard, a repeated field' => [static fn(int $i): string => '"k' . $i . '":' . ($i === 25 ? '{"v":1,"v":2}' : '{"v":' . $i . '}'), '*.v'];
+        yield 'under a wildcard, a top-level key named like the field' => [static fn(int $i): string => $i === 25 ? '"v":{"v":"named"}' : '"k' . $i . '":{"v":' . $i . '}', '*.v'];
+    }
+
+    /**
+     * @param callable(int): string $member
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('memberRunTraps')]
+    public function testAMemberRunWithATrapReadsAsOneMemberAtATimeDoes(callable $member, string|null $keyPath): void
+    {
+        $members = [];
+        for ($i = 0; $i < 60; $i++) {
+            $members[] = $member($i);
+        }
+        $document = '{' . implode(',', $members) . ',"last":{}}';
+
+        $pairs = static function (iterable $values): array {
+            $out = [];
+            foreach ($values as $key => $value) {
+                $out[] = [$key, $value];
+            }
+
+            return $out;
+        };
+
+        $expected = [];
+        foreach ([...$members, '"last":{}'] as $one) {
+            try {
+                array_push($expected, ...$pairs((new JsonChunkReader())->readGenerator(new StringSource('{' . $one . '}'), keyPath: $keyPath)));
+            } catch (\RuntimeException) {
+                // A member without the field gives nothing.
+            }
+        }
+        if ($keyPath !== null) {
+            $expected = array_map(static fn(array $pair): mixed => $pair[1], $expected);
+            $actual = iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document), keyPath: $keyPath), false);
+        } else {
+            $actual = $pairs((new JsonChunkReader())->readGenerator(new StringSource($document)));
+        }
+
+        self::assertSame($expected, $actual);
+    }
+
     public function testChunksCutAcrossRuns(): void
     {
         $document = (string)json_encode($this->records(100));

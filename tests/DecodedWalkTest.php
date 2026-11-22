@@ -56,6 +56,49 @@ final class DecodedWalkTest extends TestCase
         self::assertSame(count($expected), (new JsonChunkReader())->count(new StringSource($document), $keyPath));
     }
 
+    /**
+     * A wildcard over a list decodes a run of elements at once and walks each; the run is checked for
+     * a repeated name first. Each document is long enough to make runs of many elements, with the
+     * trap in the middle of one.
+     *
+     * @return iterable<string, array{0: callable(int): array<string, mixed>, 1: string}>
+     */
+    public static function runTraps(): iterable
+    {
+        yield 'a repeated field in one element' => [static fn(int $i): string => $i === 25 ? '{"e":"first","e":"second"}' : '{"e":' . $i . ',"x":1}', '*.e'];
+        yield 'the field nested deeper too' => [static fn(int $i): string => $i === 25 ? '{"e":1,"n":{"e":2}}' : '{"e":' . $i . '}', '*.e'];
+        yield 'the field as a string value' => [static fn(int $i): string => $i === 25 ? '{"k":"e","e":1}' : '{"e":' . $i . '}', '*.e'];
+        yield 'the field spelled with an escape' => [static fn(int $i): string => $i === 25 ? '{"\u0065":"esc","e":"plain"}' : '{"e":' . $i . '}', '*.e'];
+        yield 'some elements without the field' => [static fn(int $i): string => $i % 3 === 0 ? '{"x":' . $i . '}' : '{"e":' . $i . '}', '*.e'];
+        yield 'a repeated name further down' => [static fn(int $i): string => $i === 25 ? '{"a":{"b":1,"b":2}}' : '{"a":{"b":' . $i . '}}', '*.a.b'];
+        yield 'a repeated name under a second wildcard' => [static fn(int $i): string => $i === 25 ? '{"m":{"x":1,"x":2}}' : '{"m":{"x":' . $i . '}}', '*.m.*'];
+    }
+
+    /**
+     * @param callable(int): string $element
+     */
+    #[DataProvider('runTraps')]
+    public function testARunWithATrapReadsAsTheStreamWalkDoes(callable $element, string $keyPath): void
+    {
+        $elements = [];
+        for ($i = 0; $i < 60; $i++) {
+            $elements[] = $element($i);
+        }
+        $document = '[' . implode(',', $elements) . ',{}]';
+
+        // What the stream walk gives: each element on its own, the last one closing the list.
+        $expected = [];
+        foreach ($elements as $one) {
+            try {
+                array_push($expected, ...iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource('[' . $one . ']'), keyPath: $keyPath), false));
+            } catch (\RuntimeException) {
+                // An element without the field gives nothing.
+            }
+        }
+
+        self::assertSame($expected, iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document), keyPath: $keyPath), false));
+    }
+
     public function testObjectsModeKeepsStdClass(): void
     {
         $values = iterator_to_array((new JsonChunkReader(false))->readGenerator(new StringSource('[{"o":{"a":{"b":1}}}]'), keyPath: '*.o'), false);

@@ -3,6 +3,21 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.14.0 — 2026-11-22
+
+### Faster
+
+Runs — a few kilobytes of whole elements decoded by one `json_decode()`, which made reading a list four times faster in 1.10.0 — now serve three more reads:
+
+| 200 000 records (20 MB) | 1.13.0 | now |
+|---|---:|---:|
+| an object keyed by id, read whole | 735 ms | 212 ms |
+| `users.*.email` over a list | 740 ms | 310 ms |
+| `users.*.email` over an object keyed by id | 870 ms | 385 ms |
+
+- **An object's members** are decoded a run at a time — from a key to the last `},` within 4 KB, decoded in braces. `json_decode()` keeps one value for a repeated key where the stream hands over each, so the run's own members are also counted in its bytes — strings and nested containers cut out by PCRE, the commas left — and a run that lost one is read a member at a time.
+- **A wildcard path** decodes a run of elements, or of members, and follows the rest of the path in each. A repeated name inside them is caught for the run as a whole, and the run's bytes are then walked the stream way. For the commonest path, `*.field`, the check is a count — the field's key in the run's bytes against the elements that came back with it — and only a run where the two differ gets the full one.
+
 ## 1.13.0 — 2026-11-22
 
 ### Added

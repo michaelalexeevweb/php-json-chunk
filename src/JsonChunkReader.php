@@ -573,6 +573,26 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
+            $members = $this->decodeMemberRunFast($stream);
+            if ($members !== null) {
+                foreach ($members as $memberKey => $memberValue) {
+                    yield (string)$memberKey => $memberValue;
+                }
+
+                $delimiter = $this->readNonWhitespaceChar($stream);
+                if ($delimiter === '}') {
+                    return;
+                }
+
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.', $stream),
+                    );
+                }
+
+                continue;
+            }
+
             $key = $this->decodeScannedValue($this->readStringToken($stream, $filePath), $filePath, $stream);
 
             $separator = $this->readNonWhitespaceChar($stream);
@@ -2392,6 +2412,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int $depth,
         string $filePath,
         bool &$matched,
+        bool $runs = true,
     ): Generator {
         $fastNeedles = $this->decodedWalkNeedles($segments, $depth + 1);
         $next = $this->readNonWhitespaceChar($stream);
@@ -2415,7 +2436,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            if ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
+            if ($fastNeedles !== null && $runs && ($run = $this->decodeRunFast($stream, $valueFirst, false, $runRaw)) !== null) {
+                yield from $this->walkDecodedRun($run, (string)$runRaw, $segments, $depth, $filePath, $matched);
+            } elseif ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
                 yield from $this->walkDecodedElement($element, (string)$raw, $fastNeedles, $segments, $depth + 1, $filePath, $matched);
             } else {
                 yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
@@ -2455,6 +2478,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int $depth,
         string $filePath,
         bool &$matched,
+        bool $runs = true,
     ): Generator {
         $fastNeedles = $this->decodedWalkNeedles($segments, $depth + 1);
         $next = $this->readNonWhitespaceChar($stream);
@@ -2470,12 +2494,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             $stream->absorbPushBack();
-            $valueFirst = $this->skipObjectKey($stream, $next, $filePath);
-
-            if ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
-                yield from $this->walkDecodedElement($element, (string)$raw, $fastNeedles, $segments, $depth + 1, $filePath, $matched);
+            if ($fastNeedles !== null && $runs && $next === '"' && ($members = $this->decodeMemberRunFast($stream, false, $runRaw)) !== null) {
+                yield from $this->walkDecodedMemberRun(array_values($members), (string)$runRaw, $segments, $depth, $filePath, $matched);
             } else {
-                yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+                $valueFirst = $this->skipObjectKey($stream, $next, $filePath);
+                if ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
+                    yield from $this->walkDecodedElement($element, (string)$raw, $fastNeedles, $segments, $depth + 1, $filePath, $matched);
+                } else {
+                    yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+                }
             }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
@@ -2533,6 +2560,118 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return array_keys($needles);
+    }
+
+    /**
+     * The cheap check for the commonest path, `*.field`: the field's key bytes are counted in the run
+     * and against the elements that came back with that field. A repeated key, collapsed by
+     * json_decode(), makes the bytes outnumber the elements; so does the name anywhere else — nested
+     * deeper, or as a string value — and then the whole-run check decides instead. A `\u` escape could
+     * spell the name unseen, so a run with one is left to that check too.
+     *
+     * @param array<int, mixed> $run
+     * @param array<int, string> $segments
+     */
+    private function runRepeatsNoFieldName(string $raw, array $run, array $segments, int $depth): bool
+    {
+        if ($depth + 2 !== count($segments) || str_contains($raw, '\\u')) {
+            return false;
+        }
+
+        $field = $segments[$depth + 1];
+        if ($field === '*' || $field === '**') {
+            return false;
+        }
+
+        $holding = 0;
+        foreach ($run as $element) {
+            if ($element instanceof stdClass && property_exists($element, $field)) {
+                $holding++;
+            }
+        }
+
+        return substr_count($raw, '"' . $field . '"') === $holding;
+    }
+
+    /**
+     * walkDecodedRun() for a run of an object's members: their values, decoded as objects, each walked
+     * by the rest of the path. A repeated key among the members themselves already kept the run from
+     * being taken; one inside the values is checked here — the run's colons, one per member and one per
+     * member of every object inside, against what was decoded — and sends the run's bytes to the stream
+     * walk when it is there.
+     *
+     * @param array<int, mixed> $values
+     * @param array<int, string> $segments
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function walkDecodedMemberRun(array $values, string $raw, array $segments, int $depth, string $filePath, bool &$matched): Generator
+    {
+        $safe = $this->runRepeatsNoFieldName($raw, $values, $segments, $depth);
+        if (!$safe) {
+            // One colon per member of the run, and one per member of every object inside its values.
+            $stripped = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '', $raw);
+            $safe = $stripped !== null && substr_count($stripped, ':') === count($values) + $this->memberCount($values);
+        }
+
+        if ($safe) {
+            foreach ($values as $value) {
+                $found = [];
+                $this->followDecoded($value, $segments, $depth + 1, $found, $matched);
+                foreach ($found as $item) {
+                    yield $item;
+                }
+            }
+
+            return;
+        }
+
+        $copy = $this->newStream(new StringSource('{' . $raw . '}', $filePath));
+        try {
+            $this->readNonWhitespaceChar($copy);
+            yield from $this->walkWildcardObject($copy, $segments, $depth, $filePath, $matched, false);
+        } finally {
+            $copy->close();
+        }
+    }
+
+    /**
+     * A run of list elements decoded at once, as objects, each walked by the rest of the path. The run
+     * is checked for a repeated name as a whole — the colons in its bytes against the members decoded —
+     * and when one is there, its bytes are walked the stream way instead, one element at a time.
+     *
+     * @param array<int, mixed> $run
+     * @param array<int, string> $segments
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function walkDecodedRun(array $run, string $raw, array $segments, int $depth, string $filePath, bool &$matched): Generator
+    {
+        if ($this->runRepeatsNoFieldName($raw, $run, $segments, $depth) || $this->repeatsNoName($raw, $run)) {
+            foreach ($run as $element) {
+                $found = [];
+                $this->followDecoded($element, $segments, $depth + 1, $found, $matched);
+                foreach ($found as $value) {
+                    yield $value;
+                }
+            }
+
+            return;
+        }
+
+        $copy = $this->newStream(new StringSource('[' . $raw . ']', $filePath));
+        try {
+            $this->readNonWhitespaceChar($copy);
+            yield from $this->walkWildcardList($copy, $segments, $depth, $filePath, $matched, false);
+        } finally {
+            $copy->close();
+        }
     }
 
     /**
@@ -3002,8 +3141,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @return array<int, mixed>|null
      */
-    private function decodeRunFast(JsonStream $stream, string $valueFirst): array|null
-    {
+    private function decodeRunFast(
+        JsonStream $stream,
+        string $valueFirst,
+        bool|null $associative = null,
+        string|null &$raw = null,
+    ): array|null {
         if (($valueFirst !== '{' && $valueFirst !== '[') || $stream->charBuffer !== []) {
             return null;
         }
@@ -3018,7 +3161,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        $values = $this->decodesRun($stream, $valueFirst, $start);
+        $values = $this->decodesRun($stream, $valueFirst, $start, $associative ?? $this->associative, $raw);
         if ($values !== null) {
             $stream->fastMisses = 0;
 
@@ -3038,7 +3181,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @return array<int, mixed>|null
      */
-    private function decodesRun(JsonStream $stream, string $valueFirst, int $start): array|null
+    private function decodesRun(JsonStream $stream, string $valueFirst, int $start, bool $associative, string|null &$raw): array|null
     {
         $close = $valueFirst === '{' ? '}' : ']';
         $end = min($stream->bufLen, $start + self::RUN_BYTES);
@@ -3063,7 +3206,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             try {
-                $values = json_decode('[' . substr($stream->buf, $start, $length) . ']', $this->associative, 512, JSON_THROW_ON_ERROR);
+                $raw = substr($stream->buf, $start, $length);
+                $values = json_decode('[' . $raw . ']', $associative, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
                 return null;
             }
@@ -3078,6 +3222,107 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return null;
+    }
+
+    /**
+     * decodeRunFast() for an object's members: from the key the stream has just entered to the last
+     * `},` within RUN_BYTES, every whole `"key": value` pair decoded by ONE json_decode() of the run in
+     * braces. Null, with the stream untouched, when no run of two or more members can be had.
+     *
+     * The run's members are the document's for the same reason a list run's elements are. One thing
+     * differs: json_decode() keeps one value for a repeated key, where the stream hands over each. So
+     * the members are counted in the run's bytes too — strings and nested containers cut out, the
+     * commas left — and a run that lost one to a repeated key is read a member at a time instead.
+     *
+     * @return array<int|string, mixed>|null
+     */
+    private function decodeMemberRunFast(JsonStream $stream, bool|null $associative = null, string|null &$raw = null): array|null
+    {
+        if ($stream->charBuffer !== [] || $stream->fastMisses >= 8) {
+            return null;
+        }
+
+        if ($this->maxElementBytes !== null && $this->maxElementBytes < self::RUN_BYTES) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== '"') {
+            return null;
+        }
+
+        $members = $this->decodesMemberRun($stream, $start, $associative ?? $this->associative, $raw);
+        if ($members !== null) {
+            $stream->fastMisses = 0;
+
+            return $members;
+        }
+
+        $stream->fastMisses++;
+
+        return null;
+    }
+
+    /**
+     * The cut and the checks behind decodeMemberRunFast().
+     *
+     * @return array<int|string, mixed>|null
+     */
+    private function decodesMemberRun(JsonStream $stream, int $start, bool $associative, string|null &$raw): array|null
+    {
+        $end = min($stream->bufLen, $start + self::RUN_BYTES);
+        $searchFrom = $end - 2 - $stream->bufLen;
+
+        for ($try = 0; $try < 8; $try++) {
+            $found = $searchFrom < -$stream->bufLen ? false : strrpos($stream->buf, '},', $searchFrom);
+            if ($found === false || $found <= $start) {
+                return null;
+            }
+
+            $length = $found + 1 - $start;
+            $searchFrom = $found - 1 - $stream->bufLen;
+            if (
+                substr_count($stream->buf, '{', $start, $length) !== substr_count($stream->buf, '}', $start, $length)
+                || substr_count($stream->buf, '[', $start, $length) !== substr_count($stream->buf, ']', $start, $length)
+            ) {
+                continue;
+            }
+
+            $raw = substr($stream->buf, $start, $length);
+            try {
+                $decoded = json_decode('{' . $raw . '}', $associative, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException) {
+                return null;
+            }
+
+            $members = $decoded instanceof stdClass ? get_object_vars($decoded) : $decoded;
+            if (!is_array($members) || count($members) < 2 || $this->topLevelMemberCount($raw) !== count($members)) {
+                return null;
+            }
+
+            $stream->bufPos = $start + $length;
+
+            return $members;
+        }
+
+        return null;
+    }
+
+    /**
+     * How many `"key": value` pairs a run of an object's members holds, counted in its bytes: every
+     * string cut out, then every nested container, by PCRE in C — what is left is the run's own commas.
+     * -1 when PCRE gives up, which no count matches.
+     */
+    private function topLevelMemberCount(string $raw): int
+    {
+        $flat = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '', $raw);
+        if (!is_string($flat)) {
+            return -1;
+        }
+
+        $flat = preg_replace('/\{(?:[^{}\[\]]++|(?R))*+\}|\[(?:[^{}\[\]]++|(?R))*+\]/', '', $flat);
+
+        return is_string($flat) ? substr_count($flat, ',') + 1 : -1;
     }
 
     /**
