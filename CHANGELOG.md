@@ -3,6 +3,24 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.7.0 — 2026-11-22
+
+### Faster
+
+**Reading a list or an object of objects is three to five times faster.** An element used to be found by the PHP scanner — a stop at every quote and bracket — and then decoded by `json_decode()`, which read the same bytes again. Now `strpos()` finds where it probably ends, the next `},` or `],`; `substr_count()` rules out a place where the brackets do not balance; and `json_decode()` — needed anyway — settles it. An object or a list is complete at exactly one closing bracket, so a stretch from the opening one that decodes is the element, whatever its strings hold. Where it does not decode, or its end is not in the block in hand, the scanner reads the element as before — so a broken element is refused by the same code, with the same message.
+
+| records | 1.6.0 | 1.7.0 | JsonMachine |
+|---|---:|---:|---:|
+| 100 000 | 600 ms | 206 ms | 1 026 ms |
+| 1 000 000 | — | 1.93 s | 9.34 s |
+| 5 000 000 (424 MB) | — | 9.6 s | 46.8 s |
+
+Memory is unchanged at 0.15 MB. The README's figures are measured again; BENCHMARKS.md is not yet.
+
+### Documentation
+
+- NDJSON / JSON Lines: why this library does not read it — `fgets()` + `json_decode()` already streams it as fast as anything can, measured — and why a reader built for ONE document must not be given it: JsonMachine returned the first line's members and stopped, without an error.
+
 ## 1.6.0 — 2026-11-22
 
 ### Added

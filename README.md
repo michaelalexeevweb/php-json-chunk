@@ -7,8 +7,8 @@
 [![Total Downloads](https://img.shields.io/packagist/dt/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 
 **Read a JSON file bigger than your memory limit, one item at a time.** Arrays or objects, at the root
-or anywhere inside. The fastest of the streaming readers compared here — **a third faster than
-JsonMachine**, at every size from ten thousand records to five million — and the only one of them
+or anywhere inside. The fastest of the streaming readers compared here — **about five times faster
+than JsonMachine**, at every size measured from a hundred thousand records to five million — and the only one of them
 whose conformance is checked against [JSONTestSuite](#conformance).
 
 ```php
@@ -19,18 +19,17 @@ foreach ($reader->readGenerator(__DIR__ . '/data.json', keyPath: 'data.0.items')
 }
 ```
 
-That is the whole idea, and it is meant literally: a **1.00 GB** file of 5 400 000 records reads to the
-end **under a 32 MB memory limit**, at a 4 MB peak, in 27.5 s. Memory follows the biggest single
+That is the whole idea, and it is meant literally: a **0.91 GB** file of 5 400 000 records reads to the
+end **under a 32 MB memory limit**, at a 4 MB peak, in 12.5 s. Memory follows the biggest single
 element, never the length of the file — see [what memory scales with](#what-memory-actually-scales-with).
 
 Everything below is detail.
 
 ## Why this one
 
-**It is the fastest of them.** 100 000 records, same file, same loop — 616 ms against JsonMachine's
-937 ms, and 7 252 ms for the slowest in the set. At five million records the gap stops being an
-abstraction: **30 seconds** against 48 seconds, and **6 minutes 11 seconds** for the slowest — over
-the same 528 MB file.
+**It is the fastest of them.** 100 000 records, same file, same loop — 206 ms against JsonMachine's
+1 026 ms, and 7 978 ms for the slowest in the set. At five million records the gap stops being an
+abstraction: **9.6 seconds** against 47 seconds, over the same 424 MB file.
 
 Plain `json_decode()` is faster still when the file fits in memory — which is the honest first
 question, and the [comparison](#comparison) answers it.
@@ -68,29 +67,29 @@ For large JSON files and large datasets, that quickly becomes inefficient or imp
 ## Comparison
 
 100 000 records, a 10 MB file. Each figure is one **complete** read — every record walked to the end
-and handed back as a PHP value, no chunking. One machine, 2026-09-06 — yours will differ, so what
+and handed back as a PHP value, no chunking. One machine, 2026-11-22 — yours will differ, so what
 matters is the shape, not the milliseconds.
 
 | Approach | Peak memory | Streaming | Time |
 |---|---:|:--:|---:|
-| `json_decode()` on the whole file | 71.5 MB | ❌ | **49 ms** |
-| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | 0.15 MB | ✅ | **616 ms** |
-| [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 937 ms |
-| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 119 ms |
-| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.03 MB | ✅ | 2 982 ms¹ |
-| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.03 MB | ✅ | 3 047 ms |
-| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 252 ms |
+| `json_decode()` on the whole file | 70.2 MB | ❌ | **39 ms** |
+| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | 0.15 MB | ✅ | **206 ms** |
+| [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 1 026 ms |
+| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 198 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.04 MB | ✅ | 3 179 ms¹ |
+| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.04 MB | ✅ | 3 433 ms |
+| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 978 ms |
 
-**Read the first row before the others.** If the file fits in memory, `json_decode()` is ten to twelve
-times faster than this library at every size, and you should use it. Streaming buys one thing — memory that does not grow
+**Read the first row before the others.** If the file fits in memory, `json_decode()` is about five
+times faster than this library up to a million records, and three times at five million — and you should use it. Streaming buys one thing — memory that does not grow
 with the file — and it is paid for in time.
 
 The catch is that `json_decode()` needs about **7× the size of the file**. At five million records
-(528 MB) it wants 3.7 GB and takes 2.9 s; `PhpJsonChunk` reads the same document at **0.15 MB** in
-29.7 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
+(424 MB) it wants 3.5 GB and takes 3.1 s; `PhpJsonChunk` reads the same document at **0.15 MB** in
+9.6 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
 70 MB — and then the comparison between streaming readers is the only one left.
 
-Among those, this one is the fastest at every size measured — 34% to 38% quicker than JsonMachine,
+Among those, this one is the fastest at every size measured — 4.6 to 4.9 times quicker than JsonMachine,
 which is the next one along. It is **not** the thinnest:
 `crocodile2u` holds a fifteenth of the memory. What 0.15 MB buys is a decoded PHP value per item and
 a key path to reach it.
@@ -101,8 +100,9 @@ elements without ever building one, so its time is a floor rather than a like-fo
 ## Performance
 
 Ten thousand to five million records, with charts of how memory and time actually scale:
-**[BENCHMARKS.md](BENCHMARKS.md)**. The short version — memory is flat at 0.15 MB from 10 000 records
-to 5 000 000, and time is 5.9 ms per thousand records at every size measured.
+**[BENCHMARKS.md](BENCHMARKS.md)**. The short version — memory is flat at 0.15 MB from 10 000 records
+to 5 000 000, and time is about 2 ms per thousand records — 1.9 to 2.0 ms at 100 000, a million and five
+million records, since 1.7.0. (BENCHMARKS.md was measured before 1.7.0 and still shows the older 5.9 ms.)
 
 Run it yourself; that is why the benchmark ships in the repository:
 
@@ -124,7 +124,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.6.0
+composer require michaelalexeevweb/php-json-chunk:^1.7.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -786,6 +786,32 @@ Use `PhpJsonChunk` when you need to:
 - It is **not** a general-purpose JSON writer
 - It is **not** a validator you run for its own sake — it refuses malformed input as it reads
 - It is focused on **reading** large JSON documents, not on building them
+- It does **not** read NDJSON / JSON Lines — one JSON document per line — and does not need to (see below)
+
+### NDJSON needs no library
+
+A `.ndjson` or `.jsonl` file is a JSON document per line, with no brackets around them and no commas
+between. Each line is complete on its own, so plain PHP already streams it as fast as anything can:
+
+```php
+$handle = fopen('php://memory', 'r+b');
+fwrite($handle, "{\"id\":1}\n{\"id\":2}\n");
+rewind($handle);
+
+while (($line = fgets($handle)) !== false) {
+    if (trim($line) === '') {
+        continue;
+    }
+    $record = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+}
+fclose($handle);
+```
+
+Measured on 200 000 lines (20 MB): `fgets()` + `json_decode()` 118 ms at +0.03 MB, `SplFileObject` 116 ms;
+a block reader of the kind this library would add, 121–135 ms. Nearly all the time is `json_decode()`,
+in C, and so is finding the newline — there is nothing left for a library to win. Do not hand such a
+file to a reader built for ONE document: JsonMachine, given it, returned the five members of the first
+line and stopped, with no error, and the other 199 999 lines were simply not there.
 
 ## Conformance
 

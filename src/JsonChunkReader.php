@@ -527,12 +527,16 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             $valueOffset = $stream->offset() - 1;
-            $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
+            if ($this->decodeContainerFast($stream, $valueFirst, $value)) {
+                yield (string)$key => $value;
+            } else {
+                $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
-            try {
-                yield (string)$key => json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
-            } catch (JsonException $exception) {
-                $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
+                try {
+                    yield (string)$key => json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException $exception) {
+                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
+                }
             }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
@@ -653,14 +657,18 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // it, the stream has already run past its end.
             $valueOffset = $stream->offset() - 1;
 
-            // Hot path: use block-buffer scanners (strcspn at C level) instead of
-            // reading it a character at a time and concatenating.
-            $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
+            if ($this->decodeContainerFast($stream, $valueFirst, $value)) {
+                yield $value;
+            } else {
+                // Hot path: use block-buffer scanners (strcspn at C level) instead of
+                // reading it a character at a time and concatenating.
+                $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
-            try {
-                yield json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
-            } catch (JsonException $exception) {
-                $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
+                try {
+                    yield json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException $exception) {
+                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
+                }
             }
 
             $index++;
@@ -2028,6 +2036,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // A leaf that is not a list is yielded whole — `data.*.name` over scalars is a documented
             // use, not an error.
             $valueOffset = $stream->offset() - 1;
+            if ($this->decodeContainerFast($stream, $firstChar, $value)) {
+                yield $value;
+
+                return;
+            }
+
             $raw = $this->scanValue($stream, $firstChar, $filePath);
             if ($this->onInvalidItem === null) {
                 yield $this->decodeScannedValue($raw, $filePath, $stream);
@@ -2367,6 +2381,54 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $exception,
             );
         }
+    }
+
+    /**
+     * An object or a list the stream has just entered, found and decoded without the PHP scanner —
+     * when the block in hand makes that possible. True with $value set; false with the stream
+     * untouched, for the scanner to read it the usual way.
+     *
+     * The scanner stops at every quote and bracket of an element, in PHP; json_decode() then reads
+     * the same bytes again, in C. Here C does both: strpos() finds where the element probably ends —
+     * the next `},` (or `],`) — substr_count() rules out a place where the brackets do not balance,
+     * and json_decode() decides. Its answer settles it: an object or a list is complete at exactly one
+     * closing bracket, so a stretch from the opening one that decodes IS the element, whatever sits
+     * inside its strings. A stretch that does not decode proves nothing either way, and the scanner
+     * takes over — so a broken element is refused by the same code, with the same message, as ever.
+     */
+    private function decodeContainerFast(JsonStream $stream, string $valueFirst, mixed &$value): bool
+    {
+        if (($valueFirst !== '{' && $valueFirst !== '[') || $stream->charBuffer !== []) {
+            return false;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== $valueFirst) {
+            return false;
+        }
+
+        $close = $valueFirst === '{' ? '}' : ']';
+        $at = $this->nextHit($stream, $close . ',');
+
+        for ($try = 0; $try < 4 && $at < $stream->bufLen; $try++) {
+            $length = $at + 1 - $start;
+            if (substr_count($stream->buf, $valueFirst, $start, $length) === substr_count($stream->buf, $close, $start, $length)) {
+                try {
+                    $value = json_decode(substr($stream->buf, $start, $length), $this->associative, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException) {
+                    return false;
+                }
+
+                $stream->bufPos = $at + 1;
+
+                return true;
+            }
+
+            $found = strpos($stream->buf, $close . ',', $at + 1);
+            $at = $found === false ? $stream->bufLen : $found;
+        }
+
+        return false;
     }
 
     /**
