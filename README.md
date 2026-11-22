@@ -100,7 +100,15 @@ matters is the shape, not the milliseconds.
 | Approach | Peak memory | Streaming | Time |
 |---|---:|:--:|---:|
 | `json_decode()` on the whole file | 70.2 MB | ❌ | **42 ms** |
-| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) | 0.16 MB | ✅ | **54 ms** |
+| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) `Auto` (default) | **0.15 MB** | ✅ | **54 ms** |
+| `PhpJsonChunk` `Kb8` | 0.10 MB | ✅ | 62 ms |
+| `PhpJsonChunk` `Kb16` | 0.11 MB | ✅ | 57 ms |
+| `PhpJsonChunk` `Kb32` | 0.12 MB | ✅ | 55 ms |
+| `PhpJsonChunk` `Kb64` | 0.15 MB | ✅ | 54 ms |
+| `PhpJsonChunk` `Kb128` | 0.28 MB | ✅ | 53 ms |
+| `PhpJsonChunk` `Kb256` | 0.54 MB | ✅ | 53 ms |
+| `PhpJsonChunk` `Kb512` | 1.02 MB | ✅ | 53 ms |
+| `PhpJsonChunk` `Mb1` | 2.02 MB | ✅ | 53 ms |
 | [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 946 ms |
 | [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 158 ms |
 | [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.04 MB | ✅ | 3 018 ms¹ |
@@ -124,6 +132,10 @@ a key path to reach it.
 
 <sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
 elements without ever building one, so its time is a floor rather than a like-for-like measurement.</sub>
+
+The nine `PhpJsonChunk` rows are its [block sizes](#block-size-memory-against-speed): on records this small the
+block barely moves the time, and moves the memory from 0.10 MB to 2 MB. Where the block matters is large
+elements — the table under the link.
 
 ## Performance
 
@@ -151,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.11.0
+composer require michaelalexeevweb/php-json-chunk:^1.12.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -429,35 +441,50 @@ For a file, wrap a `FileSource`: `new FileSource(new SplFileObject($path, 'rb'),
 ### Block size: memory against speed
 
 The source is read in blocks, and the block is most of what the reader holds. An element is read the
-fast way — found and decoded in C — only when it ends within the block in hand; a bigger one is read by
-the PHP scanner, several times slower. `BlockSize` picks the trade, from 8 KB to 1 MB; the default,
-64 KB, suits most documents.
+fast way — found and decoded in C — only when it ends within the block in hand; one that does not is
+read by the PHP scanner, several times slower. What decides is the size of **one element**, never the
+size of the file.
+
+The default, `BlockSize::Auto`, works that out as it reads: it starts at 64 KB and, each time an element
+does not fit, grows the block to hold eight of it, up to 1 MB. Small records never move it; large
+elements get the block they need after the first few. Eight fixed sizes, from 8 KB to 1 MB, are there
+for a hard bound on memory.
 
 ```php
 use PhpJsonChunk\BlockSize;
 
-$lean = new JsonChunkReader(blockSize: BlockSize::Kb16);   // small records, every kilobyte counts
-$wide = new JsonChunkReader(blockSize: BlockSize::Mb1);    // elements of a hundred kilobytes and more
+$reader = new JsonChunkReader();                            // Auto: right for almost everything
+$lean = new JsonChunkReader(blockSize: BlockSize::Kb16);   // never more than a 16 KB block
 ```
+
+**Which one:**
+
+- **Don't know, or it varies** — `Auto`, the default.
+- **Every kilobyte counts, records are small** — `Kb16` or `Kb8`: 0.04–0.05 MB less than the default,
+  5% to 15% slower.
+- **Memory must stay bounded, and elements may be large** — the largest fixed size you can afford; at
+  least eight times the element is when it is read fastest.
 
 Measured on three 18–80 MB documents — a million small records, elements of 10 KB, elements of 186 KB:
 
 | `BlockSize` | small records | 10 KB elements | 186 KB elements |
 |---|---:|---:|---:|
-| `Kb8` | 615 ms · 0.12 MB | 2 035 ms · 0.43 MB | 1 944 ms · 7.8 MB |
-| `Kb16` | 564 ms · 0.12 MB | 1 503 ms · 0.64 MB | 2 004 ms · 7.8 MB |
-| `Kb32` | 511 ms · 0.14 MB | 955 ms · 0.66 MB | 2 048 ms · 7.8 MB |
-| **`Kb64`** (default) | 522 ms · 0.17 MB | 673 ms · 0.69 MB | 1 950 ms · 7.9 MB |
-| `Kb128` | 497 ms · 0.31 MB | 537 ms · 0.75 MB | 1 974 ms · 7.9 MB |
-| `Kb256` | 491 ms · 0.57 MB | 462 ms · 0.88 MB | 1 557 ms · 12.0 MB |
-| `Kb512` | 489 ms · 1.04 MB | 434 ms · 1.24 MB | 968 ms · 12.3 MB |
-| `Mb1` | 489 ms · 2.04 MB | 410 ms · 2.24 MB | 674 ms · 12.8 MB |
+| **`Auto`** (default) | **501 ms · 0.18 MB** | **545 ms · 0.75 MB** | **706 ms · 12.8 MB** |
+| `Kb8` | 645 ms · 0.12 MB | 2 085 ms · 0.43 MB | 1 964 ms · 7.8 MB |
+| `Kb16` | 563 ms · 0.13 MB | 1 582 ms · 0.64 MB | 2 069 ms · 7.8 MB |
+| `Kb32` | 546 ms · 0.14 MB | 1 002 ms · 0.66 MB | 2 045 ms · 7.8 MB |
+| `Kb64` | 540 ms · 0.18 MB | 711 ms · 0.69 MB | 2 022 ms · 7.9 MB |
+| `Kb128` | 518 ms · 0.31 MB | 574 ms · 0.75 MB | 2 041 ms · 7.9 MB |
+| `Kb256` | 495 ms · 0.57 MB | 469 ms · 0.88 MB | 1 572 ms · 12.0 MB |
+| `Kb512` | 504 ms · 1.05 MB | 450 ms · 1.24 MB | 1 035 ms · 12.3 MB |
+| `Mb1` | 524 ms · 2.05 MB | 434 ms · 2.24 MB | 710 ms · 12.8 MB |
 
 - **Small records** barely care: a smaller block saves a few hundredths of a megabyte, a larger one a few
-  percent of time.
-- **Large elements** care a lot: once the block is bigger than the element, it is read three times
-  faster. With elements of 186 KB, memory is the elements themselves — 7.8 MB decoded — whatever the
-  block.
+  percent of time — and `Auto` stays at 64 KB.
+- **Large elements** care a lot: a block too small for them reads them three times slower. `Auto` grows
+  to 128 KB for the 10 KB elements and to 1 MB for the 186 KB ones, and reads them nearly as fast as the
+  best fixed size, at a fraction of its memory where the elements are small.
+- With elements of 186 KB, memory is the elements themselves — 7.8 MB decoded — whatever the block.
 
 ### When something is wrong
 

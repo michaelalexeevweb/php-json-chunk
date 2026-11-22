@@ -33,6 +33,16 @@ final class JsonStream
     /** Size of each read block in bytes, unless the reader is given another. */
     public const BLOCK_SIZE = 65536;
 
+    /** The largest block an adaptive stream grows to. */
+    public const MAX_BLOCK_SIZE = 1048576;
+
+    /**
+     * How many elements of the size just read an adaptive block is grown to hold. An element is read
+     * slowly when it straddles two blocks; with eight to a block, one in eight at most. Two to a block
+     * was tried first: elements of 186 KB grew it to 512 KB, and read in 1.10 s against 0.71 s at 1 MB.
+     */
+    private const ELEMENTS_PER_BLOCK = 8;
+
     /**
      * One-char look-ahead stack.
      *
@@ -78,9 +88,36 @@ final class JsonStream
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
 
-    public function __construct(JsonSourceInterface $source, private readonly int $blockSize = self::BLOCK_SIZE)
-    {
+    /**
+     * @param bool $adaptive grow the block for elements that do not fit in it, up to MAX_BLOCK_SIZE
+     */
+    public function __construct(
+        JsonSourceInterface $source,
+        private int $blockSize = self::BLOCK_SIZE,
+        private readonly bool $adaptive = false,
+    ) {
         $this->source = $source;
+    }
+
+    /**
+     * An element of $bytes was just read the slow way — it did not fit, or straddled two blocks. An
+     * adaptive stream reads on in blocks that hold ELEMENTS_PER_BLOCK of it — doubling, up to
+     * MAX_BLOCK_SIZE — so that elements of the kind are read fast. The block in hand is kept; the next
+     * read is larger. Small records never get here often enough, nor big enough, to move it.
+     */
+    public function fitElement(int $bytes): void
+    {
+        $wanted = $bytes * self::ELEMENTS_PER_BLOCK;
+        if (!$this->adaptive || $wanted <= $this->blockSize || $this->blockSize >= self::MAX_BLOCK_SIZE) {
+            return;
+        }
+
+        $size = $this->blockSize;
+        while ($size < $wanted && $size < self::MAX_BLOCK_SIZE) {
+            $size *= 2;
+        }
+
+        $this->blockSize = min($size, self::MAX_BLOCK_SIZE);
     }
 
     /**

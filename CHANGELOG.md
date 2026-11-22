@@ -3,6 +3,26 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.12.0 — 2026-11-22
+
+### Changed
+
+**The default block size is `BlockSize::Auto`.** It starts at 64 KB — what 1.11.0 used — and each time an element is read the slow way, because it did not fit or straddled two blocks, grows the block to hold eight of it, up to 1 MB. What decides the right block is the size of one element, and only reading finds that out: a file cannot be weighed in advance when it is a stream, and its length says nothing about its elements.
+
+| default block | small records | 10 KB elements | 186 KB elements |
+|---|---:|---:|---:|
+| 1.11.0, 64 KB | 540 ms · 0.18 MB | 711 ms · 0.69 MB | 2.02 s · 7.9 MB |
+| 1.12.0, `Auto` | 501 ms · 0.18 MB | 545 ms · 0.75 MB | 0.71 s · 12.8 MB |
+
+Small records never move it. Large elements now cost up to 1 MB more — on a document whose elements already take megabytes once decoded. To keep the old bound, pass `blockSize: BlockSize::Kb64`.
+
+Growing to hold two elements was tried first: 186 KB elements grew the block to 512 KB and read in 1.10 s; to hold eight, 0.71 s.
+
+### Documentation
+
+- The README's comparison and BENCHMARKS.md list every block size beside the other readers, and the README says which block to pick and why.
+- `bin/benchmark.php` takes `--block-sizes`, to measure every `BlockSize`, and `--parsers=`, to measure only some readers.
+
 ## 1.11.0 — 2026-11-22
 
 ### Added

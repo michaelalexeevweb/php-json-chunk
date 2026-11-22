@@ -9,6 +9,8 @@ Reproducible from the repository:
 
 ```bash
 php bin/benchmark.php --runs=2 --sizes=10000,50000,100000,500000,1000000,5000000
+# every BlockSize of this library, five runs each
+php bin/benchmark.php --runs=5 --sizes=10000,50000,100000,500000,1000000,5000000 --block-sizes --parsers=PhpJsonChunk
 ```
 
 Back to the [README](README.md).
@@ -128,6 +130,36 @@ that hands you events rather than values has less to keep.
 <sub>¹ `salsify` is a SAX parser and is not doing the same work: the listener in the benchmark counts
 elements without ever building one, so its time is a floor rather than a like-for-like measurement.
 Every other column hands back a PHP value for each element, and the benchmark iterates all of them.</sub>
+
+## Every reader and every block size
+
+The same documents again, with this library at each of its [block sizes](README.md#block-size-memory-against-speed)
+— time in milliseconds. Its nine rows come from their own run, five rounds each; `Kb64`, which every
+earlier figure on this page was measured with, read 100 000 records in 54.0 ms there and 53.9 ms in the
+run above, so the rows sit together fairly.
+
+| Reader | 10k | 50k | 100k | 500k | 1M | 5M | peak MB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `json_decode()` | *3.6* | *20.1* | *41.7* | *208.9* | *445.0* | *2 951* | 7.1 → 3 546 |
+| **PhpJsonChunk `Auto`** (default) | 5.3 | 26.5 | 54.2 | 272.4 | 549.9 | 2 757 | 0.15–0.16 |
+| PhpJsonChunk `Kb8` | 6.3 | 30.2 | 62.1 | 314.2 | 656.9 | 3 097 | **0.10** |
+| PhpJsonChunk `Kb16` | 5.8 | 28.4 | 57.3 | 300.8 | 578.9 | 2 904 | 0.11 |
+| PhpJsonChunk `Kb32` | 5.5 | 27.2 | 55.3 | 284.4 | 544.9 | 2 815 | 0.12 |
+| PhpJsonChunk `Kb64` | 5.4 | 26.7 | 54.0 | 267.0 | 542.7 | 2 736 | 0.15–0.16 |
+| PhpJsonChunk `Kb128` | 5.3 | 26.3 | 52.9 | 275.6 | 547.5 | 2 737 | 0.27–0.29 |
+| PhpJsonChunk `Kb256` | 5.3 | 26.1 | 53.2 | 266.1 | 543.5 | 2 640 | 0.52–0.55 |
+| PhpJsonChunk `Kb512` | 5.2 | 26.2 | 52.8 | 264.2 | 528.9 | 2 675 | 1.02–1.04 |
+| PhpJsonChunk `Mb1` | 5.2 | 26.1 | 52.5 | 273.6 | 530.3 | 2 668 | 1.09–2.05 |
+| JsonMachine | 97.9 | 484.6 | 946.0 | 5 770 | 9 241 | 46 565 | 0.31 |
+| crocodile2u | 122.2 | 601.3 | 1 158 | 5 669 | 11 140 | 55 719 | 0.01 |
+| Salsify¹ | 308.9 | 1 598 | 3 018 | 15 105 | 29 905 | 150 678 | 0.03–0.04 |
+| JsonCollectionParser | 322.9 | 1 573 | 3 106 | 15 474 | 30 612 | 154 110 | 0.03–0.04 |
+| JsonDecodeStream | 742.5 | 3 726 | 8 579 | 36 370 | 72 130 | 360 795 | 0.04 |
+
+On records this small the block hardly moves the time — `Kb8` is 15% behind at worst, and everything
+from 32 KB up is within a few percent — while memory goes from 0.10 MB to 2 MB. `Auto` stays at 64 KB on
+such records and reads like `Kb64`. Where the block decides the time is large elements; the README
+[measures that](README.md#block-size-memory-against-speed).
 
 ## Method
 

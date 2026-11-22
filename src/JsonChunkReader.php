@@ -36,12 +36,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *        STRUCTURE still ends it: past an unbalanced bracket there is no telling where the next
      *        element starts. getValue() reads one value, not elements, and always throws.
      * @param BlockSize $blockSize how many bytes the source is read in at a time — less memory, or room
-     *        for large elements to be read fast; see BlockSize. The default suits most documents.
+     *        for large elements to be read fast; see BlockSize. The default, Auto, grows the block for
+     *        elements that need it and suits most documents.
      */
     public function __construct(
         private readonly bool $associative = true,
         callable|null $onInvalidItem = null,
-        private readonly BlockSize $blockSize = BlockSize::Kb64,
+        private readonly BlockSize $blockSize = BlockSize::Auto,
     ) {
         $this->onInvalidItem = $onInvalidItem === null ? null : $onInvalidItem(...);
     }
@@ -390,6 +391,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * A stream over $source in the block size this reader was given — or, for Auto, 64 KB to start with
+     * and growing for elements that do not fit.
+     */
+    private function newStream(JsonSourceInterface $source): JsonStream
+    {
+        if ($this->blockSize === BlockSize::Auto) {
+            return new JsonStream($source, JsonStream::BLOCK_SIZE, true);
+        }
+
+        return new JsonStream($source, $this->blockSize->value);
+    }
+
+    /**
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
@@ -397,7 +411,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     {
         // A source was handed over ready to read: nothing to find, nothing to open.
         if ($filePath instanceof JsonSourceInterface) {
-            return new JsonStream($filePath, $this->blockSize->value);
+            return $this->newStream($filePath);
         }
 
         // A stream wrapper is not a missing file, and saying "was not found" about `php://memory`
@@ -426,7 +440,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         // The buffer travels with the source, so nothing about this read lives on the reader.
-        return new JsonStream(new FileSource($file, $filePath), $this->blockSize->value);
+        return $this->newStream(new FileSource($file, $filePath));
     }
 
     /**
@@ -741,7 +755,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if ($firstChar === '{' || $firstChar === '[') {
-            return $this->scanNested($stream, $firstChar, $filePath);
+            $raw = $this->scanNested($stream, $firstChar, $filePath);
+            $stream->fitElement(strlen($raw));
+
+            return $raw;
         }
 
         return $this->scanPrimitive($stream, $firstChar);
@@ -1466,7 +1483,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // value is consumed once, and they never saw it, so a path plainly in the document was
             // reported missing. They walk the scanned copy instead of the stream.
             if ($active !== [] && ($firstChar === '{' || $firstChar === '[')) {
-                $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
+                $copy = $this->newStream(new StringSource($raw, $filePath));
                 try {
                     $copyFirst = $this->readNonWhitespaceChar($copy);
                     if ($copyFirst !== null) {
@@ -1763,7 +1780,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return $pairs;
         }
 
-        $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
+        $copy = $this->newStream(new StringSource($raw, $filePath));
         try {
             $copyFirst = $this->readNonWhitespaceChar($copy);
             if ($copyFirst !== null) {
@@ -1996,7 +2013,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 $wanted = $this->cursorsIntoChild($active, (string)$index);
                 if ($this->worthWalking($wanted, $valueFirst)) {
-                    $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
+                    $copy = $this->newStream(new StringSource($raw, $filePath));
                     try {
                         $copyFirst = $this->readNonWhitespaceChar($copy);
                         if ($copyFirst !== null) {
@@ -2496,7 +2513,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if (!$safe) {
-            $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
+            $copy = $this->newStream(new StringSource($raw, $filePath));
             try {
                 $copyFirst = $this->readNonWhitespaceChar($copy);
                 if ($copyFirst !== null) {
@@ -3175,6 +3192,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // most of the document a path read goes through, and the calls were most of its time.
         $stream->absorbPushBack();
 
+        // Where a container skipped here started, so that one too big for the block can grow it.
+        $started = $open === [] && ($firstChar === '{' || $firstChar === '[') ? $stream->offset() - 1 : null;
+
         // $open holds the containers entered and not yet closed, `{` or `[`.
         $char = $firstChar;
 
@@ -3220,6 +3240,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // first one that carries on.
             while (true) {
                 if ($open === []) {
+                    if ($started !== null) {
+                        $stream->fitElement($stream->offset() - $started);
+                    }
+
                     return;
                 }
 

@@ -27,14 +27,83 @@ final class BlockSizeTest extends TestCase
         }
     }
 
-    public function testTheDefaultIsSixtyFourKilobytes(): void
+    public function testTheDefaultAdaptsAndEightSizesAreFixed(): void
     {
-        self::assertSame(65536, BlockSize::Kb64->value);
         self::assertSame(
+            BlockSize::Auto,
             (new \ReflectionParameter([JsonChunkReader::class, '__construct'], 'blockSize'))->getDefaultValue(),
-            BlockSize::Kb64,
         );
-        self::assertCount(8, BlockSize::cases());
+        self::assertCount(9, BlockSize::cases());
+        self::assertSame(65536, BlockSize::Kb64->value);
+    }
+
+    /**
+     * Auto starts at 64 KB and grows only when an element does not fit: small records never move it,
+     * large elements double it until they fit — up to 1 MB, and no further.
+     */
+    public function testAutoGrowsTheBlockOnlyForElementsThatDoNotFit(): void
+    {
+        $small = [];
+        for ($i = 0; $i < 20000; $i++) {
+            $small[] = ['id' => $i, 'name' => 'record ' . $i];
+        }
+        $asked = $this->blocksAskedFor((string)json_encode($small));
+        self::assertSame([65536], array_values(array_unique($asked)));
+
+        $large = [];
+        for ($i = 0; $i < 12; $i++) {
+            $large[] = ['id' => $i, 'rows' => array_fill(0, 4000, ['k' => 'value ' . $i])];
+        }
+        $asked = $this->blocksAskedFor((string)json_encode($large));
+        self::assertSame(65536, $asked[0]);
+        self::assertGreaterThan(65536, max($asked));
+        self::assertLessThanOrEqual(1048576, max($asked));
+
+        // Elements of about 600 KB would want a 2 MB block; Auto stops at 1 MB.
+        $huge = [['rows' => array_fill(0, 60000, ['k' => 'v'])], ['rows' => array_fill(0, 60000, ['k' => 'v'])], 1];
+        self::assertSame(1048576, max($this->blocksAskedFor((string)json_encode($huge))));
+    }
+
+    /**
+     * @return array<int, int> the block size the reader asked the source for, read by read
+     */
+    private function blocksAskedFor(string $json): array
+    {
+        $source = new class ($json) implements \PhpJsonChunk\Contract\JsonSourceInterface {
+            /** @var array<int, int> */
+            public array $asked = [];
+            private int $position = 0;
+
+            public function __construct(private readonly string $json)
+            {
+            }
+
+            public function readBlock(int $size): string|null
+            {
+                $this->asked[] = $size;
+                if ($this->position >= strlen($this->json)) {
+                    return null;
+                }
+                $block = substr($this->json, $this->position, $size);
+                $this->position += strlen($block);
+
+                return $block;
+            }
+
+            public function describe(): string
+            {
+                return 'asking source';
+            }
+
+            public function close(): void
+            {
+            }
+        };
+
+        foreach ((new JsonChunkReader())->readGenerator($source) as $ignored) {
+        }
+
+        return $source->asked;
     }
 
     #[DataProvider('sizes')]

@@ -10,6 +10,7 @@ use JsonMachine\Items;
 use JsonStreamer\JsonStreamer;
 use JsonStreamingParser\Listener\ListenerInterface;
 use JsonStreamingParser\Parser as SalsifyParser;
+use PhpJsonChunk\BlockSize;
 use PhpJsonChunk\JsonChunkReader;
 
 require_once __DIR__ . '/../vendor/autoload.php';
@@ -124,20 +125,34 @@ final class RootArrayCountListener implements ListenerInterface
 /**
  * @param array<int, string> $argv
  *
- * @return array{runs: int, sizes: array<int, int>}
+ * @return array{runs: int, sizes: array<int, int>, blockSizes: bool, parsers: array<int, string>}
  */
 function parseOptions(array $argv): array
 {
     $runs = 3;
     $sizes = [10_000, 30_000, 50_000, 100_000, 500_000, 1_000_000];
+    $blockSizes = false;
+    $parsers = [];
 
     foreach ($argv as $argument) {
         if ($argument === '--help' || $argument === '-h') {
             fwrite(
                 STDOUT,
-                "Usage: php bin/benchmark.php [--runs=3] [--sizes=10000,30000]\n",
+                "Usage: php bin/benchmark.php [--runs=3] [--sizes=10000,30000] [--block-sizes] [--parsers=PhpJsonChunk,JsonMachine]\n"
+                . "  --block-sizes  measure PhpJsonChunk at every BlockSize instead of the default one\n"
+                . "  --parsers=...  measure only the parsers whose names start with one of these\n",
             );
             exit(0);
+        }
+
+        if ($argument === '--block-sizes') {
+            $blockSizes = true;
+            continue;
+        }
+
+        if (str_starts_with($argument, '--parsers=')) {
+            $parsers = array_values(array_filter(array_map('trim', explode(',', substr($argument, strlen('--parsers='))))));
+            continue;
         }
 
         if (str_starts_with($argument, '--runs=')) {
@@ -168,6 +183,8 @@ function parseOptions(array $argv): array
     return [
         'runs' => $runs,
         'sizes' => $sizes,
+        'blockSizes' => $blockSizes,
+        'parsers' => $parsers,
     ];
 }
 
@@ -224,10 +241,10 @@ function measureExecution(callable $callback): array
 /**
  * @return array{elapsedMs: float, peakDeltaMb: float, total: int}
  */
-function measurePhpJsonChunk(string $filePath): array
+function measurePhpJsonChunk(string $filePath, BlockSize $blockSize = BlockSize::Kb64): array
 {
-    return measureExecution(static function () use ($filePath): int {
-        $reader = new JsonChunkReader();
+    return measureExecution(static function () use ($filePath, $blockSize): int {
+        $reader = new JsonChunkReader(blockSize: $blockSize);
         $total = 0;
 
         foreach ($reader->readGenerator($filePath) as $item) {
@@ -382,17 +399,41 @@ function measureCrocodile2uJsonStreamer(string $filePath): array
 
 /**
  * @param array<int, int> $sizes
+ * @param array<int, string> $only parser-name prefixes to measure; empty for all of them
  */
-function runBenchmark(int $runs, array $sizes): void
+function runBenchmark(int $runs, array $sizes, bool $blockSizes = false, array $only = []): void
 {
-    $parsers = [
-        'PhpJsonChunk' => static fn(string $filePath): array => measurePhpJsonChunk($filePath),
+    $ours = ['PhpJsonChunk' => static fn(string $filePath): array => measurePhpJsonChunk($filePath)];
+    if ($blockSizes) {
+        $ours = [];
+        foreach (BlockSize::cases() as $blockSize) {
+            $ours['PhpJsonChunk ' . $blockSize->name] = static fn(string $filePath): array => measurePhpJsonChunk($filePath, $blockSize);
+        }
+    }
+
+    $parsers = $ours + [
         'JsonMachine' => static fn(string $filePath): array => measureJsonMachine($filePath),
         'Salsify' => static fn(string $filePath): array => measureSalsify($filePath),
         'JsonDecodeStream' => static fn(string $filePath): array => measureJsonDecodeStream($filePath),
         'JsonCollectionParser' => static fn(string $filePath): array => measureJsonCollectionParser($filePath),
         'Crocodile2uJsonStreamer' => static fn(string $filePath): array => measureCrocodile2uJsonStreamer($filePath),
     ];
+
+    if ($only !== []) {
+        $parsers = array_filter(
+            $parsers,
+            static function (string $name) use ($only): bool {
+                foreach ($only as $prefix) {
+                    if (str_starts_with($name, $prefix)) {
+                        return true;
+                    }
+                }
+
+                return false;
+            },
+            ARRAY_FILTER_USE_KEY,
+        );
+    }
 
 
 
@@ -405,14 +446,7 @@ function runBenchmark(int $runs, array $sizes): void
         $filePath = buildDatasetFile($count);
 
         try {
-            $resultsByParser = [
-                'PhpJsonChunk' => [],
-                'JsonMachine' => [],
-                'Salsify' => [],
-                'JsonDecodeStream' => [],
-                'JsonCollectionParser' => [],
-                'Crocodile2uJsonStreamer' => [],
-            ];
+            $resultsByParser = array_fill_keys(array_keys($parsers), []);
 
             // Warm-up each parser once to reduce one-time initialization noise.
             foreach ($parsers as $parserName => $measure) {
@@ -473,4 +507,4 @@ function runBenchmark(int $runs, array $sizes): void
 }
 
 $options = parseOptions(array_slice($_SERVER['argv'], 1));
-runBenchmark($options['runs'], $options['sizes']);
+runBenchmark($options['runs'], $options['sizes'], $options['blockSizes'], $options['parsers']);
