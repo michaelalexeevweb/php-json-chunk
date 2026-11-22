@@ -1,6 +1,6 @@
 {
     "name": "michaelalexeevweb/php-json-chunk",
-    "description": "Read large JSON files in PHP one item at a time — arrays or objects, in chunks, iterators or generators, without loading the file into memory.",
+    "description": "The fastest streaming JSON reader for PHP — 15–21× faster than JsonMachine, within reach of json_decode(), at 0.16 MB. Read large JSON files one item at a time: arrays or objects, in chunks, iterators or generators.",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -21,7 +21,9 @@
         "large-json",
         "large-json-file",
         "parse-large-json",
-        "json-decode"
+        "json-decode",
+        "fast",
+        "high-performance"
     ],
     "require": {
         "php": ">=8.1"

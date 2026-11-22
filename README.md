@@ -6,11 +6,14 @@
 [![PHP Version](https://img.shields.io/packagist/php-v/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 [![Total Downloads](https://img.shields.io/packagist/dt/michaelalexeevweb/php-json-chunk)](https://packagist.org/packages/michaelalexeevweb/php-json-chunk)
 
-**Read a JSON file bigger than your memory limit, one item at a time.** Arrays or objects, at the root
-or anywhere inside. The fastest of the streaming readers compared here — **fifteen to twenty
-times faster than JsonMachine**, at every size measured from ten thousand records to five million, and
-within reach of `json_decode()` itself — and the only one of them
-whose conformance is checked against [JSONTestSuite](#conformance).
+**The fastest streaming JSON reader for PHP.** Read a JSON file bigger than your memory limit, one
+item at a time — arrays or objects, at the root or anywhere inside.
+
+- **15–21× faster than JsonMachine**, at every size measured from ten thousand records to five million.
+- **Within 1.2–1.8× of `json_decode()`** up to a million records, and **ahead of it** at five million —
+  at **0.16 MB** where `json_decode()` holds 3.5 GB.
+- **The same answers as `json_decode()`**: every root-array document of [JSONTestSuite](#conformance)
+  gets PHP's own verdict, checked on every test run.
 
 ```php
 $reader = new PhpJsonChunk\JsonChunkReader();
@@ -66,6 +69,27 @@ Standard JSON parsing in PHP usually means reading the whole file into memory fi
 For large JSON files and large datasets, that quickly becomes inefficient or impossible.
 
 `PhpJsonChunk` solves this by streaming JSON array data and returning items or chunks incrementally.
+
+## How it is fast
+
+PHP is interpreted; the C functions behind it — `strpos()`, `substr_count()`, `json_decode()` — go
+through bytes at the speed of the machine. A streaming reader written as a PHP loop over characters
+pays for every quote and bracket in PHP. This one does almost none of its work there:
+
+- **It guesses, and `json_decode()` checks.** The end of an element is found by `strpos()` — the next
+  `},` — and settled by `json_decode()`, which is needed anyway. An object is complete at exactly one
+  closing bracket, so a stretch that decodes is the element, whatever its strings hold.
+- **It decodes a run at a time.** Every whole element in the next 4 KB is decoded by one
+  `json_decode()` call, so the PHP work around an element is paid once per forty elements, not once per
+  element.
+- **It skips in C.** A branch on the way to a key path is checked by `json_validate()` on PHP 8.3 and
+  later, and under `**` a branch whose bytes do not hold the name is not walked at all.
+- **It falls back rather than guess wrong.** Whatever the fast path cannot settle — a broken element,
+  a repeated name, a nest deeper than 512 levels, an element bigger than the block in hand — is read
+  the slow way, so every error and every edge case answers exactly as it always did.
+
+At five million records it overtakes `json_decode()` itself: that builds one 3.5 GB array, while this
+builds forty elements at a time and lets each run go.
 
 ## Comparison
 
