@@ -3,6 +3,27 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.8.0 — 2026-11-22
+
+### Faster
+
+**A path that picks a field out of every element — `users.*.email` — is about four times faster.** It walked each element key by key in PHP, so taking one field cost five times as much as decoding the whole element. An element that ends within the block in hand is now decoded whole in C, and the rest of the path followed in the decoded value — decoded as objects, so a list and an object stay told apart as they are in the stream. Memory stays bounded: only an element that fits in the block is decoded.
+
+The two walks must answer alike, and differ in one place: a repeated name, where the stream takes the first value and `json_decode()` keeps the last. An element that holds a name the path goes through more than once, or a `\u` escape that could spell one, is walked the stream way.
+
+| 200 000 records (20 MB) | 1.7.0 | now | JsonMachine |
+|---|---:|---:|---:|
+| `users.*.email`, a list | 2.5 s | 0.64 s | 4.7 s |
+| `users.*.email`, a map keyed by id | 2.6 s | 0.84 s | 3.4 s¹ |
+
+<sub>¹ JsonMachine's `-` matches list indices only, so it reads every member whole and takes the field from it.</sub>
+
+A pretty-printed document was checked too and needs nothing: PHP's own `JSON_PRETTY_PRINT` writes `},` together and breaks the line after the comma, so the 1.7.0 read is as fast on it — 200 ms against 192 ms for the same 100 000 records unformatted.
+
+### Tests
+
+- **JSONTestSuite is a test now.** Its 236 root-array documents are in `tests/fixtures/json-test-suite/`, with the suite's MIT licence, and `ConformanceTest` checks each one's verdict against `json_decode()`'s — and an accepted one's values — on every run. It was a script run by hand.
+
 ## 1.7.0 — 2026-11-22
 
 ### Faster

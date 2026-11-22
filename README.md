@@ -124,7 +124,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.7.0
+composer require michaelalexeevweb/php-json-chunk:^1.8.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -826,7 +826,9 @@ meant to read:
 | `i_` implementation-defined | 31 | 31 |
 
 Not one verdict differs from PHP's own parser, and nothing outside that scope — a root object, string
-or number — is accepted. The corpus is not vendored; re-run it yourself:
+or number — is accepted. The 236 root-array files are in the repository, under
+`tests/fixtures/json-test-suite/` with their MIT licence, and `ConformanceTest` checks every verdict — and
+every accepted document's values — on each run of the suite. The whole corpus can be re-run too:
 
 ```bash
 php bin/jsontestsuite.php                       # fetches the corpus into a temporary directory

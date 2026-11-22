@@ -16,6 +16,7 @@ use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\Source\FileSource;
 use PhpJsonChunk\Source\StringSource;
 use SplFileObject;
+use stdClass;
 use Throwable;
 
 final class JsonChunkReader implements JsonChunkReaderInterface
@@ -2108,6 +2109,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $filePath,
         bool &$matched,
     ): Generator {
+        $fastNeedles = $this->decodedWalkNeedles($segments, $depth + 1);
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === ']') {
             return;
@@ -2129,7 +2131,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+            if ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
+                yield from $this->walkDecodedElement($element, (string)$raw, $fastNeedles, $segments, $depth + 1, $filePath, $matched);
+            } else {
+                yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+            }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
             if ($delimiter === ']') {
@@ -2166,6 +2172,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $filePath,
         bool &$matched,
     ): Generator {
+        $fastNeedles = $this->decodedWalkNeedles($segments, $depth + 1);
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === '}') {
             return;
@@ -2181,7 +2188,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $stream->absorbPushBack();
             $valueFirst = $this->skipObjectKey($stream, $next, $filePath);
 
-            yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+            if ($fastNeedles !== null && $this->decodeContainerFast($stream, $valueFirst, $element, false, $raw)) {
+                yield from $this->walkDecodedElement($element, (string)$raw, $fastNeedles, $segments, $depth + 1, $filePath, $matched);
+            } else {
+                yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+            }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
             if ($delimiter === '}') {
@@ -2196,6 +2207,171 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $next = $this->readNonWhitespaceChar($stream);
         }
+    }
+
+    /**
+     * Whether the rest of a path, from $depth on, can be walked over an element decoded whole rather
+     * than over the stream — and if so, the key bytes to check each element for. Null when it cannot:
+     * a name with a slash, a quote, a backslash or a control character, which the check below cannot
+     * see through.
+     *
+     * The decoded walk is how a small element is read fast: json_decode() reads it in C, and the path
+     * is followed in a PHP array instead of key by key in the stream. It must answer exactly what the
+     * stream walk answers, and the two differ in one place — a repeated name: the stream takes the
+     * first, json_decode() keeps the last. So each element is checked for every name the path still
+     * has to match, and one that holds a name more than once, or holds a `\u` escape that could spell
+     * one, is walked the stream way instead.
+     *
+     * @param array<int, string> $segments
+     *
+     * @return array<int, string>|null
+     */
+    private function decodedWalkNeedles(array $segments, int $depth): array|null
+    {
+        // Nothing left to follow: the element itself is the value, and the leaf read already decodes it
+        // fast, in the shape asked for — decoding it as objects only to convert it back would cost more.
+        if ($depth >= count($segments)) {
+            return null;
+        }
+
+        $needles = [];
+        for ($index = $depth, $count = count($segments); $index < $count; $index++) {
+            $segment = $segments[$index];
+            if ($segment === '*' || $segment === '**') {
+                continue;
+            }
+
+            if (str_contains($segment, '/') || preg_match('/["\\\\\x00-\x1f]/', $segment) === 1) {
+                return null;
+            }
+
+            $needles['"' . $segment . '"'] = true;
+        }
+
+        return array_keys($needles);
+    }
+
+    /**
+     * One element, decoded whole as objects, walked by the rest of the path — or, when its bytes show
+     * a repeated or escaped name the path goes through, walked from those bytes the stream way.
+     *
+     * @param array<int, string> $needles
+     * @param array<int, string> $segments
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function walkDecodedElement(
+        mixed $element,
+        string $raw,
+        array $needles,
+        array $segments,
+        int $depth,
+        string $filePath,
+        bool &$matched,
+    ): Generator {
+        $safe = $needles === [] || !str_contains($raw, '\\u');
+        foreach ($needles as $needle) {
+            if (!$safe || substr_count($raw, $needle) > 1) {
+                $safe = false;
+
+                break;
+            }
+        }
+
+        if (!$safe) {
+            $copy = new JsonStream(new StringSource($raw, $filePath));
+            try {
+                $copyFirst = $this->readNonWhitespaceChar($copy);
+                if ($copyFirst !== null) {
+                    yield from $this->walkKeyPath($copy, $copyFirst, $segments, $depth, $filePath, $matched);
+                }
+            } finally {
+                $copy->close();
+            }
+
+            return;
+        }
+
+        $found = [];
+        $this->followDecoded($element, $segments, $depth, $found, $matched);
+        foreach ($found as $value) {
+            yield $value;
+        }
+    }
+
+    /**
+     * walkKeyPath(), over a value already decoded with objects as stdClass — so a list and an object
+     * stay told apart, as they are in the stream.
+     *
+     * @param array<int, string> $segments
+     * @param array<int, mixed> $found
+     */
+    private function followDecoded(mixed $node, array $segments, int $depth, array &$found, bool &$matched): void
+    {
+        if ($depth >= count($segments)) {
+            $matched = true;
+            if (is_array($node) && $this->walksLeafList($segments)) {
+                foreach ($node as $item) {
+                    $found[] = $this->asConfigured($item);
+                }
+
+                return;
+            }
+
+            $found[] = $this->asConfigured($node);
+
+            return;
+        }
+
+        $segment = $segments[$depth];
+        if ($segment === '*') {
+            if (is_array($node) || $node instanceof stdClass) {
+                foreach (is_array($node) ? $node : get_object_vars($node) as $child) {
+                    $this->followDecoded($child, $segments, $depth + 1, $found, $matched);
+                }
+            }
+
+            return;
+        }
+
+        if ($node instanceof stdClass) {
+            if (property_exists($node, $segment)) {
+                $this->followDecoded($node->{$segment}, $segments, $depth + 1, $found, $matched);
+            }
+
+            return;
+        }
+
+        if (is_array($node) && ctype_digit($segment) && array_key_exists((int)$segment, $node)) {
+            $this->followDecoded($node[(int)$segment], $segments, $depth + 1, $found, $matched);
+        }
+    }
+
+    /**
+     * A value decoded with objects as stdClass, in the shape the reader was asked for.
+     */
+    private function asConfigured(mixed $value): mixed
+    {
+        if (!$this->associative) {
+            return $value;
+        }
+
+        if ($value instanceof stdClass) {
+            $value = get_object_vars($value);
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $key => $child) {
+                if (is_array($child) || $child instanceof stdClass) {
+                    $value[$key] = $this->asConfigured($child);
+                }
+            }
+        }
+
+        return $value;
     }
 
     /**
@@ -2396,8 +2572,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * inside its strings. A stretch that does not decode proves nothing either way, and the scanner
      * takes over — so a broken element is refused by the same code, with the same message, as ever.
      */
-    private function decodeContainerFast(JsonStream $stream, string $valueFirst, mixed &$value): bool
-    {
+    private function decodeContainerFast(
+        JsonStream $stream,
+        string $valueFirst,
+        mixed &$value,
+        bool|null $associative = null,
+        string|null &$raw = null,
+    ): bool {
         if (($valueFirst !== '{' && $valueFirst !== '[') || $stream->charBuffer !== []) {
             return false;
         }
@@ -2413,8 +2594,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         for ($try = 0; $try < 4 && $at < $stream->bufLen; $try++) {
             $length = $at + 1 - $start;
             if (substr_count($stream->buf, $valueFirst, $start, $length) === substr_count($stream->buf, $close, $start, $length)) {
+                $raw = substr($stream->buf, $start, $length);
                 try {
-                    $value = json_decode(substr($stream->buf, $start, $length), $this->associative, 512, JSON_THROW_ON_ERROR);
+                    $value = json_decode($raw, $associative ?? $this->associative, 512, JSON_THROW_ON_ERROR);
                 } catch (JsonException) {
                     return false;
                 }

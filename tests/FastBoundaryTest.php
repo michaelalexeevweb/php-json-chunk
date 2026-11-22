@@ -30,7 +30,7 @@ final class FastBoundaryTest extends TestCase
         yield 'empty containers' => ['[{},[],{},{"a":{}},[[]]]'];
         yield 'pretty printed' => ["[\n  {\n    \"a\": 1\n  },\n  {\n    \"b\": [\n      1\n    ]\n  }\n]"];
         yield 'an object of objects' => ['{"u1":{"a":{"x":1},"b":2},"u2":{"c":"},"},"u3":[1,{"d":4}]}'];
-        yield 'unicode and escapes' => ['[{"é":"é\n\t"},{"k\\\\":"}\\\\"},{"z":"😀"}]'];
+        yield 'unicode and escapes' => ['[{"é":"\u00e9\n\t"},{"k\\\\":"}\\\\"},{"\u007a":"\ud83d\ude00"}]'];
     }
 
     #[DataProvider('documents')]
