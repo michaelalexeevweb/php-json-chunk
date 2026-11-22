@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.12.0
+composer require michaelalexeevweb/php-json-chunk:^1.13.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -485,6 +485,36 @@ Measured on three 18–80 MB documents — a million small records, elements of 
   to 128 KB for the 10 KB elements and to 1 MB for the 186 KB ones, and reads them nearly as fast as the
   best fixed size, at a fraction of its memory where the elements are small.
 - With elements of 186 KB, memory is the elements themselves — 7.8 MB decoded — whatever the block.
+
+### Documents from someone else
+
+Nothing in a document can run code: every value goes through `json_decode()`, which builds arrays,
+`stdClass` objects, strings and numbers — no constructor, no `__wakeup()`, no autoloading. A value
+reading `<?php system('id'); ?>` comes back as that string.
+
+What a document can do is be **big in one place**. Memory follows the biggest single element, and one
+500 MB string is one element: read whole, it ends PHP with a fatal "Allowed memory size exhausted" that
+nothing can catch. For an upload or anything else you did not write, give the reader a limit:
+
+```php
+use PhpJsonChunk\ElementTooLargeException;
+use PhpJsonChunk\Source\StringSource;
+
+$guarded = new JsonChunkReader(maxElementBytes: 1_048_576);   // 1 MB per element
+
+try {
+    foreach ($guarded->readGenerator(new StringSource('[{"id":1},{"id":2}]')) as $item) {
+        // ...
+    }
+} catch (ElementTooLargeException $exception) {
+    // one element was bigger than 1 MB; refused while it was being read
+}
+```
+
+The element is refused **while it is being read**: a 60 MB string under a 1 MB limit is given up at
+1.1 MB, at a 1.7 MB peak, instead of the 115 MB it takes whole. A branch the key path only skips is
+never held, and is not limited. Paths that are not filesystem paths are refused too — `phar://`,
+`php://filter`, `data:` and the rest — for the document and for `tempChunkDir` alike.
 
 ### When something is wrong
 

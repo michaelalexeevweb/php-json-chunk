@@ -3,6 +3,17 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.13.0 — 2026-11-22
+
+### Added
+
+- **`maxElementBytes`**, a constructor option for documents from someone else. Memory follows the biggest single element, and one 500 MB string is one element: read whole, it ends PHP with a fatal error nothing can catch. With a limit, an element bigger than it — a value handed over, a key on the way to it — is refused with `ElementTooLargeException` while it is being read: a 60 MB string under a 1 MB limit is given up at 1.1 MB, at a 1.7 MB peak, instead of the 115 MB it takes whole. A branch the path only skips is never held and is not limited. No limit by default.
+
+### Security
+
+- **`tempChunkDir` refuses a stream wrapper**, as the document path already did: `phar://`, `php://`, `data:` and the rest, in any case. It is the caller's setting, not the document's, but the directory is made, written to and read back, and through a wrapper — `phar://` above all — that was a filesystem operation nobody meant to hand to one.
+- Audited again for 1.12.0: nothing in a document can run code — values go through `json_decode()` and `json_validate()` only, and there is no `eval`, `unserialize`, `include` or call by name anywhere in the library. Every hostile input tried — two million levels of nesting, under `**` too; a 100 000-segment path; 300 000 elements built to trip the fast paths; repeated keys and escapes against the repeated-name check — ends in an exception or a linear read, never a crash.
+
 ## 1.12.0 — 2026-11-22
 
 ### Changed

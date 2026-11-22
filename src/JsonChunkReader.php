@@ -38,12 +38,22 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @param BlockSize $blockSize how many bytes the source is read in at a time — less memory, or room
      *        for large elements to be read fast; see BlockSize. The default, Auto, grows the block for
      *        elements that need it and suits most documents.
+     * @param int|null $maxElementBytes the most bytes one element — a value handed over, a key on the
+     *        way to it — may take; a bigger one is refused with ElementTooLargeException while it is being
+     *        read, before it is all in memory. Null, the default, sets no limit. Give one when the document
+     *        comes from someone else: a single 500 MB string otherwise ends PHP with a fatal error. A
+     *        branch the path only skips is never held, and is not limited.
      */
     public function __construct(
         private readonly bool $associative = true,
         callable|null $onInvalidItem = null,
         private readonly BlockSize $blockSize = BlockSize::Auto,
+        private readonly int|null $maxElementBytes = null,
     ) {
+        if ($maxElementBytes !== null && $maxElementBytes < 1) {
+            throw new InvalidArgumentException('maxElementBytes must be at least 1, or null for no limit.');
+        }
+
         $this->onInvalidItem = $onInvalidItem === null ? null : $onInvalidItem(...);
     }
 
@@ -391,6 +401,33 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * Refuses an element that has grown past maxElementBytes — called as it grows, so the refusal comes
+     * before the whole of it is in memory.
+     *
+     * @throws ElementTooLargeException
+     */
+    private function assertWithinLimit(JsonStream $stream, int $bytes): void
+    {
+        if ($this->maxElementBytes !== null && $bytes > $this->maxElementBytes) {
+            throw new ElementTooLargeException(sprintf(
+                'An element read up to byte %d is larger than maxElementBytes, %d bytes.',
+                $stream->offset(),
+                $this->maxElementBytes,
+            ));
+        }
+    }
+
+    /**
+     * Whether a path names a stream wrapper rather than the filesystem. PHP finds a wrapper whatever
+     * case its scheme is in, so the match ignores case too — `FILE://` is a file, `PHAR://` is a wrapper.
+     * `data:` is the one scheme PHP opens without `//`.
+     */
+    private function isStreamWrapper(string $path): bool
+    {
+        return preg_match('#^(?:(?!file://)[a-z][a-z0-9+.\-]*://|data:)#i', $path) === 1;
+    }
+
+    /**
      * A stream over $source in the block size this reader was given — or, for Auto, 64 KB to start with
      * and growing for elements that do not fit.
      */
@@ -422,7 +459,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // ignores case too — `FILE://` is a file, `PHAR://` is a wrapper. `data:` is the one scheme
         // PHP opens without `//`; `is_file()` turned it away only because the data wrapper cannot
         // stat, and that is not a guarantee worth leaning on.
-        if (preg_match('#^(?:(?!file://)[a-z][a-z0-9+.\-]*://|data:)#i', $filePath) === 1) {
+        if ($this->isStreamWrapper($filePath)) {
             throw new InvalidArgumentException(sprintf(
                 'JSON source "%s" is a stream wrapper; this reader needs a filesystem path.',
                 $filePath,
@@ -789,6 +826,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 // No special char before end of block — consume all remaining bytes.
                 $result .= substr($stream->buf, $stream->bufPos);
                 $stream->bufPos = $stream->bufLen;
+                $this->assertWithinLimit($stream, strlen($result));
                 continue;
             }
 
@@ -797,6 +835,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $stream->bufPos = $segEnd + 1;
 
             if ($special === '"') {
+                if ($this->maxElementBytes !== null) {
+                    $this->assertWithinLimit($stream, strlen($result));
+                }
+
                 return $result; // closing quote found
             }
 
@@ -834,6 +876,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             if ($segEnd >= $stream->bufLen) {
                 $result .= substr($stream->buf, $stream->bufPos);
                 $stream->bufPos = $stream->bufLen;
+                if ($this->maxElementBytes !== null) {
+                    $this->assertWithinLimit($stream, strlen($result));
+                }
+
                 continue;
             }
 
@@ -844,11 +890,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             if ($struct === '"') {
                 // Scan string body so that `{`, `}`, `[`, `]` inside strings are skipped.
                 $result .= $this->scanStringRemainder($stream, $filePath);
+                if ($this->maxElementBytes !== null) {
+                    $this->assertWithinLimit($stream, strlen($result));
+                }
             } elseif ($struct === '{' || $struct === '[') {
                 $depth++;
             } else { // `}` or `]`
                 $depth--;
             }
+        }
+
+        // Growth is checked at each string and each block; this catches the rest of the element.
+        if ($this->maxElementBytes !== null) {
+            $this->assertWithinLimit($stream, strlen($result));
         }
 
         return $result;
@@ -880,12 +934,17 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             if ($segEnd >= $stream->bufLen) {
                 $result .= substr($stream->buf, $stream->bufPos);
                 $stream->bufPos = $stream->bufLen;
+                $this->assertWithinLimit($stream, strlen($result));
                 continue;
             }
 
             $result .= substr($stream->buf, $stream->bufPos, $spanLen);
             $stream->bufPos = $segEnd; // leave delimiter in buffer (not consumed)
             break;
+        }
+
+        if ($this->maxElementBytes !== null) {
+            $this->assertWithinLimit($stream, strlen($result));
         }
 
         return $result;
@@ -2903,6 +2962,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             if ($depth === 0) {
                 $length = $at + 1 - $start;
+                if ($this->maxElementBytes !== null && $length > $this->maxElementBytes) {
+                    // Left to the scanner, which refuses it at the limit with the usual message.
+                    return false;
+                }
+
                 $raw = substr($stream->buf, $start, $length);
                 try {
                     $value = json_decode($raw, $associative ?? $this->associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
@@ -2946,6 +3010,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         $start = $stream->bufPos - 1;
         if ($start < 0 || $stream->buf[$start] !== $valueFirst || $stream->fastMisses >= 8) {
+            return null;
+        }
+
+        // Under a limit smaller than a run, one element of a run could pass it unseen.
+        if ($this->maxElementBytes !== null && $this->maxElementBytes < self::RUN_BYTES) {
             return null;
         }
 
@@ -3472,6 +3541,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function prepareTempChunkDirectory(string $tempChunkDir): string
     {
+        // The directory is made, written to and read back: through a wrapper — `phar://` above all —
+        // that is a filesystem operation the caller never meant to hand to one.
+        if ($this->isStreamWrapper($tempChunkDir)) {
+            throw new InvalidArgumentException(sprintf(
+                'Temporary chunk directory "%s" is a stream wrapper; it must be a filesystem path.',
+                $tempChunkDir,
+            ));
+        }
+
         // `@` because this failure is REPORTED, not ignored: the throw below says the same thing with
         // the path in it, and a library that raises an exception should not also print to the output
         // buffer on its way there — under a web SAPI that lands in the response body.
