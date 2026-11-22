@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhpJsonChunk;
 
+use Closure;
 use Generator;
 use InvalidArgumentException;
 use Iterator;
@@ -28,10 +29,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * `forEach()` would otherwise have had to grow the same argument.
      *
      * Object KEYS are decoded as strings whatever this says: a key is a name, not a value.
+     *
+     * @param (callable(InvalidItem): mixed)|null $onInvalidItem an element json_decode() refuses — a bad
+     *        number, a broken escape — is handed here and skipped, instead of ending the read. A broken
+     *        STRUCTURE still ends it: past an unbalanced bracket there is no telling where the next
+     *        element starts. getValue() reads one value, not elements, and always throws.
      */
-    public function __construct(private readonly bool $associative = true)
-    {
+    public function __construct(
+        private readonly bool $associative = true,
+        callable|null $onInvalidItem = null,
+    ) {
+        $this->onInvalidItem = $onInvalidItem === null ? null : $onInvalidItem(...);
     }
+
+    /** @var (Closure(InvalidItem): mixed)|null */
+    private readonly Closure|null $onInvalidItem;
 
     private const DEFAULT_TEMP_CHUNK_SIZE = 1000;
 
@@ -420,7 +432,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             if ($resolved !== '[' && $resolved !== '{') {
                 throw new RuntimeException(sprintf(
-                    'Resolved key path "%s" must point to a JSON array or object.',
+                    'Resolved key path "%s" must point to a JSON array or object; getValue() reads a single value.',
                     $this->describeKeyPath($keyPath),
                 ));
             }
@@ -513,11 +525,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             try {
                 yield (string)$key => json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException $exception) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessageAt($filePath, $exception->getMessage(), $valueOffset),
-                    0,
-                    $exception,
-                );
+                $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
             }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
@@ -623,6 +631,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $stream->pushBack($next);
+        $index = 0;
 
         while (true) {
             $valueFirst = $this->readNonWhitespaceChar($stream);
@@ -644,13 +653,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             try {
                 yield json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException $exception) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessageAt($filePath, $exception->getMessage(), $valueOffset),
-                    0,
-                    $exception,
-                );
+                $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
             }
 
+            $index++;
             $delimiter = $this->readNonWhitespaceChar($stream);
 
             if ($delimiter === ']') {
@@ -894,17 +900,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 throw new InvalidArgumentException($this->invalidJsonMessage(null, 'object key must be a string.', $stream));
             }
 
-            $keyToken = $this->readStringToken($stream, null);
-
-            try {
-                $decodedKey = json_decode($keyToken, true, 512, JSON_THROW_ON_ERROR);
-            } catch (JsonException $exception) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage(null, $exception->getMessage(), $stream),
-                    0,
-                    $exception,
-                );
-            }
+            $decodedKey = $this->keyFromToken($this->readStringToken($stream, null), null, $stream);
 
             $separator = $this->readNonWhitespaceChar($stream);
             if ($separator !== ':') {
@@ -1357,8 +1353,20 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 return;
             }
 
+            $valueOffset = $stream->offset() - 1;
             $raw = $this->scanValue($stream, $firstChar, $filePath);
-            $value = $this->decodeScannedValue($raw, $filePath, $stream);
+            if ($this->onInvalidItem === null) {
+                $value = $this->decodeScannedValue($raw, $filePath, $stream);
+            } else {
+                try {
+                    $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException $exception) {
+                    // The paths that go on below this value would walk the same broken bytes.
+                    $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
+
+                    return;
+                }
+            }
 
             foreach ($arrived as $cursor) {
                 if (is_array($value) && $firstChar === '[' && $this->walksLeafList($cursor['segments'])) {
@@ -1432,6 +1440,17 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         $stream->pushBack($next);
 
+        // Only a named segment needs the name. When every path here is at `*`, the names are skipped
+        // without being copied or decoded, as walkWildcardObject() does for a single path.
+        $needsKey = false;
+        foreach ($cursors as $cursor) {
+            if ($cursor['segments'][$cursor['depth']] !== '*') {
+                $needsKey = true;
+
+                break;
+            }
+        }
+
         while (true) {
             $keyFirst = $this->readNonWhitespaceChar($stream);
             if ($keyFirst !== '"') {
@@ -1440,28 +1459,33 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            $key = (string)$this->decodeScannedValue($this->readStringToken($stream, $filePath), $filePath, $stream);
+            if ($needsKey) {
+                $key = $this->keyFromToken($this->readStringToken($stream, $filePath), $filePath, $stream);
 
-            $separator = $this->readNonWhitespaceChar($stream);
-            if ($separator !== ':') {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'expected ":" after object key.', $stream),
-                );
-            }
+                $separator = $this->readNonWhitespaceChar($stream);
+                if ($separator !== ':') {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'expected ":" after object key.', $stream),
+                    );
+                }
 
-            $valueFirst = $this->readNonWhitespaceChar($stream);
-            if ($valueFirst === null) {
-                throw new InvalidArgumentException(
-                    $this->invalidJsonMessage($filePath, 'unexpected end of input in object value.', $stream),
-                );
+                $valueFirst = $this->readNonWhitespaceChar($stream);
+                if ($valueFirst === null) {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'unexpected end of input in object value.', $stream),
+                    );
+                }
+            } else {
+                $key = null;
+                $stream->absorbPushBack();
+                $valueFirst = $this->skipObjectKey($stream, $keyFirst, $filePath);
             }
 
             $wanted = [];
             foreach ($cursors as $cursor) {
-                // `*` means every element of a LIST, here as in readGenerator(): on an object it matches
-                // nothing — not a member that happens to be named "*".
+                // `*` walks every member of an object as it walks every element of a list.
                 $segment = $cursor['segments'][$cursor['depth']];
-                if ($segment !== '*' && $segment === $key) {
+                if ($segment === '*' || $segment === $key) {
                     $cursor['depth']++;
                     $wanted[] = $cursor;
                 }
@@ -1596,7 +1620,23 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             // A leaf that is not a list is yielded whole — `data.*.name` over scalars is a documented
             // use, not an error.
-            yield $this->decodeScannedValue($this->scanValue($stream, $firstChar, $filePath), $filePath, $stream);
+            $valueOffset = $stream->offset() - 1;
+            $raw = $this->scanValue($stream, $firstChar, $filePath);
+            if ($this->onInvalidItem === null) {
+                yield $this->decodeScannedValue($raw, $filePath, $stream);
+
+                return;
+            }
+
+            try {
+                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException $exception) {
+                $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
+
+                return;
+            }
+
+            yield $value;
 
             return;
         }
@@ -1604,13 +1644,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $segment = $segments[$depth];
 
         if ($segment === '*') {
-            if ($firstChar !== '[') {
+            if ($firstChar === '[') {
+                yield from $this->walkWildcardList($stream, $segments, $depth, $filePath, $matched);
+            } elseif ($firstChar === '{') {
+                yield from $this->walkWildcardObject($stream, $segments, $depth, $filePath, $matched);
+            } else {
                 $this->skipValue($stream, $firstChar, $filePath);
-
-                return;
             }
-
-            yield from $this->walkWildcardList($stream, $segments, $depth, $filePath, $matched);
 
             return;
         }
@@ -1684,6 +1724,60 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * `*` on an object: descend into every member's value, in document order. The names are not
+     * wanted, so they are skipped the way a skipped branch skips them — no copy, no json_decode() —
+     * which is what keeps a map keyed by id as cheap to walk as a list.
+     *
+     * A repeated name is walked each time it appears: this is a stream of members, not the array
+     * json_decode() would collapse them into.
+     *
+     * @param array<int, string> $segments
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function walkWildcardObject(
+        JsonStream $stream,
+        array $segments,
+        int $depth,
+        string $filePath,
+        bool &$matched,
+    ): Generator {
+        $next = $this->readNonWhitespaceChar($stream);
+        if ($next === '}') {
+            return;
+        }
+
+        while (true) {
+            if ($next === null) {
+                throw new InvalidArgumentException(
+                    $this->invalidJsonMessage($filePath, 'unexpected end of input in object.', $stream),
+                );
+            }
+
+            $stream->absorbPushBack();
+            $valueFirst = $this->skipObjectKey($stream, $next, $filePath);
+
+            yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
+
+            $delimiter = $this->readNonWhitespaceChar($stream);
+            if ($delimiter === '}') {
+                return;
+            }
+
+            if ($delimiter !== ',') {
+                throw new InvalidArgumentException(
+                    $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.', $stream),
+                );
+            }
+
+            $next = $this->readNonWhitespaceChar($stream);
+        }
+    }
+
+    /**
      * A named segment inside an object: descend into the member that carries the name, skip the rest,
      * and leave the stream just past the object's closing brace.
      *
@@ -1717,7 +1811,6 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $stream->pushBack($next);
-        $taken = false;
 
         while (true) {
             $keyFirst = $this->readNonWhitespaceChar($stream);
@@ -1727,7 +1820,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            $decodedKey = $this->decodeScannedValue($this->readStringToken($stream, $filePath), $filePath, $stream);
+            $decodedKey = $this->keyFromToken($this->readStringToken($stream, $filePath), $filePath, $stream);
 
             $separator = $this->readNonWhitespaceChar($stream);
             if ($separator !== ':') {
@@ -1743,13 +1836,30 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            if (!$taken && $decodedKey === $segment) {
-                $taken = true;
-
+            if ($decodedKey === $segment) {
                 yield from $this->walkKeyPath($stream, $valueFirst, $segments, $depth + 1, $filePath, $matched);
-            } else {
-                $this->skipValue($stream, $valueFirst, $filePath);
+
+                // The member is found. Whatever follows it — a repeated name included — is skipped in
+                // ONE call, at the speed a skipped branch goes, not a key and three calls per member.
+                $delimiter = $this->readNonWhitespaceChar($stream);
+                if ($delimiter === '}') {
+                    return;
+                }
+
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.', $stream),
+                    );
+                }
+
+                $nextKey = $this->readNonWhitespaceChar($stream);
+                $stream->absorbPushBack();
+                $this->skipValue($stream, $this->skipObjectKey($stream, $nextKey, $filePath), $filePath, ['{']);
+
+                return;
             }
+
+            $this->skipValue($stream, $valueFirst, $filePath);
 
             $delimiter = $this->readNonWhitespaceChar($stream);
             if ($delimiter === '}') {
@@ -1824,6 +1934,56 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $index++;
         }
+    }
+
+    /**
+     * An object key, from its raw token, for comparing against a path segment.
+     *
+     * A key with no backslash in it is exactly the bytes between its quotes, so it needs no
+     * json_decode() — and a path walking a hundred thousand objects compares half a million keys.
+     * One with an escape goes through json_decode(), which also refuses a broken escape.
+     *
+     * @throws InvalidArgumentException
+     */
+    private function keyFromToken(string $token, string|null $filePath, JsonStream $stream): string
+    {
+        if (!str_contains($token, '\\')) {
+            return substr($token, 1, -1);
+        }
+
+        try {
+            return (string)json_decode($token, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new InvalidArgumentException(
+                $this->invalidJsonMessage($filePath, $exception->getMessage(), $stream),
+                0,
+                $exception,
+            );
+        }
+    }
+
+    /**
+     * An element json_decode() refused: handed to `onInvalidItem` when there is one, and refused
+     * with the byte it starts at when there is not.
+     *
+     * @throws InvalidArgumentException
+     */
+    private function handOverInvalidItem(
+        JsonException $exception,
+        string $rawValue,
+        int $valueOffset,
+        int|string|null $key,
+        string $filePath,
+    ): void {
+        if ($this->onInvalidItem === null) {
+            throw new InvalidArgumentException(
+                $this->invalidJsonMessageAt($filePath, $exception->getMessage(), $valueOffset),
+                0,
+                $exception,
+            );
+        }
+
+        ($this->onInvalidItem)(new InvalidItem($rawValue, $exception->getMessage(), $valueOffset, $key));
     }
 
     /**
@@ -1916,16 +2076,18 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * once per nesting level, so a skipped branch of twenty thousand `[` — forty kilobytes — ran the
      * PHP process out of C stack and killed it with a segmentation fault: no exception, no message, and
      * whoever controls the document controls when that happens.
+     *
+     * @param array<int, string> $open containers already entered around this value: `['{']` skips the
+     *                                 value and then the rest of the object it sits in, in one call
      */
-    private function skipValue(JsonStream $stream, string $firstChar, string|null $filePath): void
+    private function skipValue(JsonStream $stream, string $firstChar, string|null $filePath, array $open = []): void
     {
         // Everything below reads the block buffer directly — `strspn()` over whitespace, `strcspn()`
         // over a string or a number — instead of a method call per character: a skipped branch is
         // most of the document a path read goes through, and the calls were most of its time.
         $stream->absorbPushBack();
 
-        /** @var array<int, string> $open the containers entered and not yet closed, `{` or `[` */
-        $open = [];
+        // $open holds the containers entered and not yet closed, `{` or `[`.
         $char = $firstChar;
 
         while (true) {
@@ -2385,6 +2547,49 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         throw new RuntimeException(sprintf('Index %d not found in target array of "%s".', $index, $this->describeSource($filePath)));
+    }
+
+    /**
+     * The one value a path names — a scalar, an object or a list, decoded whole — read up to that
+     * value and no further. What follows it is never read, so it is never checked either: this is
+     * a lookup, not a validation of the document.
+     *
+     * @param string|array<int, string> $keyPath a dotted path, or its segments taken literally
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getValue(string|JsonSourceInterface $filePath, string|array $keyPath): mixed
+    {
+        if ($keyPath === '' || $keyPath === []) {
+            throw new InvalidArgumentException('A key path is required: getValue() reads the value a path names.');
+        }
+
+        $segments = $this->splitAndValidateKeyPath($keyPath);
+        if (in_array('*', $segments, true)) {
+            throw new InvalidArgumentException(sprintf(
+                'Key path "%s" has a wildcard and names many values; read them with readGenerator().',
+                $this->describeKeyPath($keyPath),
+            ));
+        }
+
+        $stream = $this->openFile($filePath);
+        $sourceName = $this->describeSource($filePath);
+
+        try {
+            $first = $this->readNonWhitespaceChar($stream);
+            if ($first === null) {
+                throw new InvalidArgumentException($this->invalidJsonMessage(null, 'empty content.', $stream));
+            }
+
+            $this->assertNoByteOrderMark($first);
+
+            $valueFirst = $this->seekPath($stream, $first, $segments, 0, $keyPath);
+
+            return $this->decodeScannedValue($this->scanValue($stream, $valueFirst, $sourceName), $sourceName, $stream);
+        } finally {
+            $stream->close();
+        }
     }
 
     /**

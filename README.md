@@ -49,7 +49,10 @@ an open stream reads like a file; and a complaint names the byte it failed at.
 
 - ✅ Stream large JSON arrays **and objects** in PHP
 - ✅ Read item-by-item or chunk-by-chunk
-- ✅ Reach nested data via `keyPath`, with `*` for "every element"
+- ✅ Reach nested data via `keyPath`, with `*` for "every element" of a list **or an object**
+- ✅ Read one value — a scalar too — and stop there: `getValue()`
+- ✅ Skip broken elements instead of failing the whole read
+- ✅ Report progress on long reads
 - ✅ Generators and iterators, so memory stays flat
 - ✅ `limit` and `offset` without loading the whole dataset
 - ✅ Optionally spill chunks to temporary files for very large workloads
@@ -120,7 +123,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.4.1
+composer require michaelalexeevweb/php-json-chunk:^1.5.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -190,10 +193,14 @@ $items = $reader->readGenerator(
 - a root array like `[{"id":1},{"id":2}]`, streamed item by item
 - a root object like `{"u1":{...},"u2":{...}}`, streamed as `key => value`
 - anything nested, reached by `keyPath` — `data.0.items`, or `['a.b']` when a key contains a dot
-- `*` for "every element of this list": `key1.*.key2.*.key3`
+- `*` for "every element of this list, or every member of this object": `key1.*.key2.*.key3`
 
 A path that lands on a list streams its items; one that ends in `*` hands each element over as it is,
 so `items.*` gives the same values as `items`. An object reached through a wildcard comes whole.
+
+`*` walks an object's members the way it walks a list's elements, so a map keyed by id needs no
+special treatment — `users.*.email` reads the email of every user in `{"users":{"u1":{...},"u2":{...}}}`.
+The names are skipped, not decoded; a repeated name is walked each time it appears.
 
 A path has at most 512 segments, json_decode()'s own depth limit; a longer one is refused with an
 `InvalidArgumentException`.
@@ -302,6 +309,67 @@ $reader->forEach(__DIR__ . '/data.json', function (array $item): bool {
 });
 ```
 
+### One value, a scalar too
+
+`getValue()` returns the value a path names — a number, a string, an object, a list — and stops reading
+there. A total at the head of a gigabyte export costs the bytes up to it:
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+$export = new StringSource('{"meta":{"total":2,"version":"2"},"items":[{"id":1},{"id":2}]}');
+$total = $reader->getValue($export, 'meta.total');   // 2
+```
+
+What follows the value is never read, so it is never checked either: this is a lookup, not a validation.
+A path with `*` names many values and is refused; read those with `readGenerator()`.
+
+### Skipping broken elements
+
+One element with a bad number or a broken escape among a million good ones ends a read. Give the
+reader an `onInvalidItem` handler and the element is handed over and skipped instead:
+
+```php
+use PhpJsonChunk\InvalidItem;
+use PhpJsonChunk\Source\StringSource;
+
+$lenient = new JsonChunkReader(onInvalidItem: function (InvalidItem $item): void {
+    error_log(sprintf('skipped element %s at byte %d: %s', $item->key, $item->offset, $item->reason));
+});
+
+foreach ($lenient->readGenerator(new StringSource('[{"id":1},{"id":01},{"id":3}]')) as $item) {
+    // {"id":1}, then {"id":3}
+}
+```
+
+`InvalidItem` carries the element's raw `json`, json_decode()'s `reason`, the byte `offset` it starts at
+and its `key` — the index or name, or `null` under a wildcard. Skipped elements are left out of
+`count()` too. A broken STRUCTURE — an unbalanced bracket — still ends the read: past it there is no
+telling where the next element starts.
+
+### Progress
+
+The reader keeps nothing about a read on itself, so progress comes from the source: `ProgressSource`
+wraps any source and reports the bytes taken after every 64 KB block. It costs the parse nothing.
+
+```php
+use PhpJsonChunk\Source\ProgressSource;
+use PhpJsonChunk\Source\StringSource;
+
+$json = '[{"id":1},{"id":2}]';
+$source = new ProgressSource(
+    new StringSource($json),
+    function (int $bytesRead, ?int $totalBytes): void {
+        printf("\r%d%%", intdiv($bytesRead * 100, (int)$totalBytes));
+    },
+    strlen($json),   // filesize($path), a Content-Length — whatever gives the total
+);
+
+$reader->count($source);
+```
+
+For a file, wrap a `FileSource`: `new FileSource(new SplFileObject($path, 'rb'), $path)`.
+
 ### When something is wrong
 
 Complaints name the byte they failed at, and it points at the START of the value that could not be
@@ -408,6 +476,24 @@ foreach ($generator as $chunk) {
 ```
 
 ## Convenience Methods
+
+### `getValue()`
+
+Returns the one value a path names — a scalar, an object or a list, decoded whole — and reads no further.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use PhpJsonChunk\JsonChunkReader;
+use PhpJsonChunk\Source\StringSource;
+
+$reader = new JsonChunkReader();
+
+$version = $reader->getValue(new StringSource('{"meta":{"version":"2"},"data":[]}'), 'meta.version');
+var_dump($version); // string(1) "2"
+```
 
 ### `getFirst()`
 

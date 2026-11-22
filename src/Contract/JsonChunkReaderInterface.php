@@ -78,6 +78,17 @@ interface JsonChunkReaderInterface
     ): Generator;
 
     /**
+     * Returns the one value a path names — a scalar, an object or a list, decoded whole — reading
+     * the document up to that value and no further.
+     *
+     * @param string|array<int, string> $keyPath a dotted path, or its segments taken literally
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function getValue(string|JsonSourceInterface $filePath, string|array $keyPath): mixed;
+
+    /**
      * Returns the first element of the target JSON array.
      *
      * @throws InvalidArgumentException

@@ -125,7 +125,7 @@ final class DifferentialTest extends TestCase
         }
 
         $path = $paths[mt_rand(0, count($paths) - 1)];
-        $wildcarded = array_map(static fn(string $segment): string => ctype_digit($segment) && mt_rand(0, 1) === 1 ? '*' : $segment, $path);
+        $wildcarded = array_map(static fn(string $segment): string => mt_rand(0, 1) === 1 ? '*' : $segment, $path);
         $reads = [
             'readGenerator' => fn(): mixed => iterator_to_array($reader->readGenerator($this->source($broken), keyPath: $path), false),
             'count' => fn(): mixed => $reader->count($this->source($broken), $path),
@@ -215,7 +215,7 @@ final class DifferentialTest extends TestCase
         $cursor = $tree;
         $changed = false;
         foreach ($segments as $index => $segment) {
-            if (is_array($cursor) && ($changed === false || mt_rand(0, 1) === 1)) {
+            if ((is_array($cursor) || $cursor instanceof stdClass) && ($changed === false || mt_rand(0, 1) === 1)) {
                 $wildcarded[$index] = '*';
                 $changed = true;
             }
@@ -234,7 +234,8 @@ final class DifferentialTest extends TestCase
 
     /**
      * What a wildcard path yields, from the decoded tree: a list it ends on is streamed, unless the path
-     * ends in `*`; an object leaf comes whole; `*` on anything but a list matches nothing.
+     * ends in `*`; an object leaf comes whole; `*` walks a list's elements and an object's member values,
+     * and on a scalar matches nothing.
      *
      * @param array<int, string> $segments
      * @return array<int, mixed>
@@ -247,11 +248,11 @@ final class DifferentialTest extends TestCase
 
         $segment = array_shift($segments);
         if ($segment === '*') {
-            if (!is_array($node)) {
+            if (!is_array($node) && !$node instanceof stdClass) {
                 return [];
             }
             $values = [];
-            foreach ($node as $element) {
+            foreach (is_array($node) ? $node : get_object_vars($node) as $element) {
                 array_push($values, ...$this->wildcard($element, $segments, $segments === []));
             }
 

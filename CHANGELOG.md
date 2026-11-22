@@ -3,6 +3,23 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.5.0 — 2026-11-22
+
+### Changed
+
+**`*` walks the members of an object too.** It used to match the elements of a list only, and an object met by `*` gave nothing — so `users.*.email` over a map keyed by id, `{"users":{"u1":{...},"u2":{...}}}`, found nothing at all. JsonMachine's `-` cannot read that path either: it matches list indices only. It now yields every member's value, in document order; the names are skipped without being decoded. A path that used to cross an object with `*` and find nothing will now find its members.
+
+### Added
+
+- **`getValue($source, $keyPath)`** returns the one value a path names — a scalar as readily as a container — and stops reading there. `meta.total` at the head of a large export costs the bytes up to it. A path that landed on a scalar used to be refused by every read.
+- **`onInvalidItem`**, a constructor handler: an element `json_decode()` refuses is handed over as an `InvalidItem` — its raw JSON, the reason, the byte it starts at, its index or name — and skipped, instead of ending the read. A broken structure still ends it.
+- **`ProgressSource`** wraps any source and reports the bytes read after every 64 KB block, for a progress bar on a long read. It adds nothing to the parse.
+
+### Faster
+
+- A path through objects — `users.*.email` — skips the rest of each object in one pass once the member is found, instead of a key and three calls per remaining member: 2.9 s to 2.3–2.5 s on 200 000 records (20 MB), against JsonMachine's 4.8 s for the same path.
+- A key without an escape is compared as its raw bytes, without `json_decode()`.
+
 ## 1.4.1 — 2026-11-22
 
 ### Fixed

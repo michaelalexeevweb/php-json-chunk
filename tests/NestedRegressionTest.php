@@ -161,9 +161,10 @@ final class NestedRegressionTest extends TestCase
         $document = '{"a":[{"b":[[1,[2,[3]]],{"k":[4]},[],5]},{"b":[[]]},{"b":{"not":"a list"}}]}';
         $source = static fn(): StringSource => new StringSource($document);
 
-        $expected = [[1, [2, [3]]], ['k' => [4]], [], 5, []];
+        // The last `b` is an object: `*` walks its members too, so its one value comes last.
+        $expected = [[1, [2, [3]]], ['k' => [4]], [], 5, [], 'a list'];
         self::assertSame($expected, iterator_to_array($this->reader->readGenerator($source(), keyPath: 'a.*.b.*'), false));
-        self::assertSame(5, $this->reader->count($source(), 'a.*.b.*'));
+        self::assertSame(6, $this->reader->count($source(), 'a.*.b.*'));
         self::assertSame(
             [2, [3]],
             iterator_to_array($this->reader->readGenerator($source(), keyPath: 'a.*.b.*.1'), false),
@@ -209,23 +210,26 @@ final class NestedRegressionTest extends TestCase
     }
 
     /**
-     * `*` matches every element of a LIST. readPaths() also matched a member literally named "*",
-     * which readGenerator() never did — two answers to one path.
+     * `*` is a wildcard, never a name. readPaths() once matched a member literally named "*" where
+     * readGenerator() did not; now that `*` walks every member of an object, the one named "*" is
+     * walked as one member among the rest — by both reads, no more and no less.
      */
-    public function testAWildcardNeverMatchesAMemberNamedStar(): void
+    public function testAWildcardTreatsAMemberNamedStarAsAnyOtherMember(): void
     {
-        $document = '{"a":{"*":[{"b":{"*":{"c":1}}}],"x":[{"b":{"*":{"c":2}}}]}}';
+        $document = '{"a":{"*":[{"b":1}],"x":[{"b":{"*":{"c":2},"y":{"c":3}}}]}}';
 
-        foreach (['a.*.b', 'a.x.*.b.*.c'] as $path) {
+        foreach (['a.*.b' => [], 'a.x.*.b.*.c' => [2, 3], 'a.*.*.b' => [1, ['*' => ['c' => 2], 'y' => ['c' => 3]]]] as $path => $expected) {
             foreach (['readGenerator', 'readPaths'] as $method) {
                 try {
                     $values = $method === 'readGenerator'
                         ? iterator_to_array($this->reader->readGenerator(new StringSource($document), keyPath: $path), false)
                         : iterator_to_array($this->reader->readPaths(new StringSource($document), [$path]), false);
-                    self::fail(sprintf('%s(%s) found %s', $method, $path, json_encode($values)));
                 } catch (RuntimeException $exception) {
                     self::assertStringContainsString('not found', $exception->getMessage(), $method . ' ' . $path);
+                    $values = [];
                 }
+
+                self::assertSame($expected, $values, $method . ' ' . $path);
             }
         }
     }
