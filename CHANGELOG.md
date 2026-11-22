@@ -3,6 +3,20 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.6.0 — 2026-11-22
+
+### Added
+
+- **`**` in a key path: any number of levels, none included.** `**.email` is every member named `email` wherever it sits, through objects and lists; `users.**.email` includes `users.email`. Matches come in document order, an inner one right after the outer one it sits in. It works in `readGenerator()`, `read()`, `count()`, `readPaths()` and the rest; `getValue()` refuses it, as it does `*`.
+  - A list it lands on is streamed element by element and each element searched before the next is read, so memory stays at one element — `**.users` over a 20 MB list peaks at 0.16 MB.
+  - `**` must be followed by a name or an index: `a.**`, `**.*` and `**.**` are refused, since they would hand over every value in the document and every value inside each.
+  - It is refused, not crashed on, past 512 levels of nesting — `json_decode()`'s own limit.
+  - A branch whose raw bytes do not contain the name — and no backslash, which could spell it differently — is skipped whole instead of walked. On 200 000 records (20 MB): a name that is not there, 4.2 s → 2.7 s; `**.email`, 4.4 s → 4.2 s; a name in every record, 4.6 s → 4.9 s.
+
+### Changed
+
+- `readPaths()` with one path inside another's list — `a` and `a.0.b` — no longer holds the whole list: each element is handed over and then searched, in document order. The values are the same; where both paths match inside one element, the order follows the document instead of the paths.
+
 ## 1.5.0 — 2026-11-22
 
 ### Changed

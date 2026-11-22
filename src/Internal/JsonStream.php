@@ -58,6 +58,16 @@ final class JsonStream
      */
     private int $bytesBeforeBuffer = 0;
 
+    /**
+     * Where each byte sequence a `**` read looks for next occurs in $buf, at or after a position it was
+     * asked from — or $bufLen for nowhere. Looked up once per stretch of the block, not once per
+     * container, so the look costs one pass over the block whatever the number of containers in it.
+     * Cleared whenever $buf is replaced.
+     *
+     * @var array<string, int>
+     */
+    public array $nextHit = [];
+
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
 
@@ -83,6 +93,7 @@ final class JsonStream
     public function adopt(string $chunk, int $startPos = 0): void
     {
         $this->bytesBeforeBuffer += $this->bufLen;
+        $this->nextHit = [];
         $this->buf = $chunk;
         $this->bufLen = strlen($chunk);
         $this->bufPos = $startPos;
@@ -110,6 +121,7 @@ final class JsonStream
         }
 
         $offset = $this->offset();
+        $this->nextHit = [];
         $this->buf = implode('', array_reverse($this->charBuffer)) . substr($this->buf, $this->bufPos);
         $this->bufLen = strlen($this->buf);
         $this->bufPos = 0;

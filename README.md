@@ -50,6 +50,7 @@ an open stream reads like a file; and a complaint names the byte it failed at.
 - ✅ Stream large JSON arrays **and objects** in PHP
 - ✅ Read item-by-item or chunk-by-chunk
 - ✅ Reach nested data via `keyPath`, with `*` for "every element" of a list **or an object**
+- ✅ Find a key at any depth with `**`
 - ✅ Read one value — a scalar too — and stop there: `getValue()`
 - ✅ Skip broken elements instead of failing the whole read
 - ✅ Report progress on long reads
@@ -123,7 +124,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.5.0
+composer require michaelalexeevweb/php-json-chunk:^1.6.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -194,6 +195,7 @@ $items = $reader->readGenerator(
 - a root object like `{"u1":{...},"u2":{...}}`, streamed as `key => value`
 - anything nested, reached by `keyPath` — `data.0.items`, or `['a.b']` when a key contains a dot
 - `*` for "every element of this list, or every member of this object": `key1.*.key2.*.key3`
+- `**` for "any number of levels, none included": `**.email`, `orders.**.sku`
 
 A path that lands on a list streams its items; one that ends in `*` hands each element over as it is,
 so `items.*` gives the same values as `items`. An object reached through a wildcard comes whole.
@@ -201,6 +203,33 @@ so `items.*` gives the same values as `items`. An object reached through a wildc
 `*` walks an object's members the way it walks a list's elements, so a map keyed by id needs no
 special treatment — `users.*.email` reads the email of every user in `{"users":{"u1":{...},"u2":{...}}}`.
 The names are skipped, not decoded; a repeated name is walked each time it appears.
+
+### Any depth: `**`
+
+`**` stands for any number of levels, none included, through objects and lists alike. `**.email` is
+every member named `email` wherever it sits; `users.**.email` is every one under `users`, `users.email`
+itself among them.
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+$document = new StringSource('{"user":{"email":"a","backup":{"email":"b"}},"admins":[{"email":"c"}]}');
+
+foreach ($reader->readGenerator($document, keyPath: '**.email') as $email) {
+    // "a", "b", "c"
+}
+```
+
+- Matches come in document order, and one found inside another comes right after it: `**.node` over
+  `{"node":{"node":{}}}` gives the outer node, then the inner.
+- A list it lands on is streamed one element at a time, as any path's is, and each element is searched
+  before the next is read — only that element is held, however long the list.
+- `**` must be followed by a name or an index. `a.**`, `**.*` and `**.**` would hand over every value in
+  the document, and every value inside each of those, and are refused.
+- It walks every branch, so it goes as deep as the document does — down to 512 levels, `json_decode()`'s
+  own limit. A document that goes deeper is refused with an exception.
+- A branch whose bytes cannot hold the name is skipped whole, at the speed a skipped branch goes, rather
+  than walked: looking for a key that is rare in a large document costs little more than reading it.
 
 A path has at most 512 segments, json_decode()'s own depth limit; a longer one is refused with an
 `InvalidArgumentException`.

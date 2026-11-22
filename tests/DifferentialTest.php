@@ -197,6 +197,17 @@ final class DifferentialTest extends TestCase
             return;
         }
 
+        // `**` and the name this path ends on: every member or element by that name, at any depth.
+        $name = $segments[count($segments) - 1];
+        if ($name !== '*') {
+            $recursive = ['**', $name];
+            $expected = $this->recursive($tree, $name);
+            $described = $context . ' — path ' . json_encode($recursive);
+            self::assertSame($this->serialized($expected), $this->serialized(iterator_to_array($reader->readGenerator($this->source($json), keyPath: $recursive), false)), $described);
+            self::assertSame(count($expected), $reader->count($this->source($json), $recursive), $described);
+            self::assertSame($this->serialized($expected), $this->serialized(iterator_to_array($reader->readPaths($this->source($json), [$recursive]), false)), $described);
+        }
+
         $members = $this->members($node);
         self::assertSame($this->serialized($members), $this->serialized($this->pairs($reader->readGenerator($this->source($json), keyPath: $segments))), $context);
         self::assertSame(count($members), $reader->count($this->source($json), $segments), $context);
@@ -266,6 +277,35 @@ final class DifferentialTest extends TestCase
         }
 
         return [];
+    }
+
+    /**
+     * What `**.<name>` yields, from the decoded tree, in document order: a match comes whole — a list
+     * one element at a time — and whatever matches inside it follows it.
+     *
+     * @return array<int, mixed>
+     */
+    private function recursive(mixed $node, string $name): array
+    {
+        $children = is_array($node) ? $node : ($node instanceof stdClass ? get_object_vars($node) : []);
+        $values = [];
+        foreach ($children as $key => $child) {
+            if ((string)$key !== $name) {
+                array_push($values, ...$this->recursive($child, $name));
+            } elseif (is_array($child)) {
+                // The list is a node too: after each element comes what matches at it — the element
+                // itself again when its index is the name — and inside it.
+                foreach ($child as $index => $element) {
+                    $values[] = $this->associative($element);
+                    array_push($values, ...$this->recursive([$index => $element], $name));
+                }
+            } else {
+                $values[] = $this->associative($child);
+                array_push($values, ...$this->recursive($child, $name));
+            }
+        }
+
+        return $values;
     }
 
     /**

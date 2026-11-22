@@ -62,6 +62,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private const MAX_KEY_PATH_SEGMENTS = 512;
 
     /**
+     * How deep `**` walks. It descends into every branch, so the depth is the document's, not the
+     * path's — and the walk recurses once per level. json_decode()'s own limit: nothing deeper could be
+     * decoded anyway, and a document that goes on is refused instead of running PHP out of stack.
+     */
+    private const MAX_RECURSIVE_DEPTH = 512;
+
+    /**
      * @throws InvalidArgumentException
      * @throws RuntimeException
      *
@@ -1018,9 +1025,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             ));
         }
 
-        foreach ($segments as $segment) {
+        foreach ($segments as $index => $segment) {
             if (!is_string($segment)) {
                 throw new InvalidArgumentException('Key path segments must be strings.');
+            }
+
+            // `a.**`, `**.*` and `**.**` would hand over every node below — each value, then each value
+            // inside it, again and again. `**` is for finding something by name.
+            if ($segment === '**') {
+                $next = $segments[$index + 1] ?? null;
+                if (!is_string($next) || $next === '*' || $next === '**') {
+                    throw new InvalidArgumentException(sprintf(
+                        'In key path "%s", "**" must be followed by a name or an index.',
+                        is_string($keyPath) ? $keyPath : implode('", "', array_filter($segments, 'is_string')),
+                    ));
+                }
             }
 
             // `a..b` is a typo in the dotted form. In the list form every segment is taken literally,
@@ -1038,7 +1057,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function hasWildcardSegment(string|array $keyPath): bool
     {
-        return in_array('*', $this->splitAndValidateKeyPath($keyPath), true);
+        $segments = $this->splitAndValidateKeyPath($keyPath);
+
+        return in_array('*', $segments, true) || in_array('**', $segments, true);
     }
 
     /**
@@ -1232,7 +1253,18 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $this->assertNoByteOrderMark($first);
 
-            yield from $this->walkKeyPath($stream, $first, $segments, 0, $filePath, $matched);
+            if (in_array('**', $segments, true)) {
+                // `**` can stand on several places in one path at once — a level it spans and the
+                // level after it — which is what the cursors of readPaths() are for.
+                $found = [];
+                $cursors = [['segments' => $segments, 'depth' => 0, 'label' => '', 'id' => 0, 'needle' => $this->needleFor($segments)]];
+                foreach ($this->walkCursors($stream, $first, $cursors, $filePath, $found, 0) as $value) {
+                    yield $value;
+                }
+                $matched = $found !== [];
+            } else {
+                yield from $this->walkKeyPath($stream, $first, $segments, 0, $filePath, $matched);
+            }
 
             if (!$matched) {
                 throw new RuntimeException(sprintf('Key path "%s" was not found.', $this->describeKeyPath($keyPath)));
@@ -1264,10 +1296,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     {
         $cursors = [];
         foreach ($keyPaths as $keyPath) {
+            $segments = $this->splitAndValidateKeyPath($keyPath);
             $cursors[] = [
-                'segments' => $this->splitAndValidateKeyPath($keyPath),
+                'segments' => $segments,
                 'depth' => 0,
                 'label' => $this->describeKeyPath($keyPath),
+                'id' => count($cursors),
+                'needle' => $this->needleFor($segments),
             ];
         }
 
@@ -1287,7 +1322,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $this->assertNoByteOrderMark($first);
 
-            yield from $this->walkCursors($stream, $first, $cursors, $sourceName, $matched);
+            yield from $this->walkCursors($stream, $first, $cursors, $sourceName, $matched, 0);
 
             $missed = [];
             foreach ($cursors as $cursor) {
@@ -1311,7 +1346,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     /**
      * One value, and every cursor currently standing on it. Consumes the value whole.
      *
-     * @param array<int, array{segments: array<int, string>, depth: int, label: string}> $cursors
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
      * @param array<string, bool> $matched
      *
      * @return Generator<string, mixed>
@@ -1324,7 +1359,17 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         array $cursors,
         string $filePath,
         array &$matched,
+        int $level,
     ): Generator {
+        if ($level > self::MAX_RECURSIVE_DEPTH) {
+            throw new InvalidArgumentException($this->invalidJsonMessage(
+                $filePath,
+                sprintf('nesting deeper than %d levels; "**" does not walk below json_decode()\'s own depth.', self::MAX_RECURSIVE_DEPTH),
+                $stream,
+            ));
+        }
+
+        $cursors = $this->expandRecursiveCursors($cursors);
         $arrived = [];
         $active = [];
 
@@ -1349,6 +1394,16 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 foreach ($this->streamArrayValues($stream, $filePath) as $item) {
                     yield $label => $item;
                 }
+
+                return;
+            }
+
+            // A list several paths stand on — one arrived, others going on below, as `**` always does —
+            // is walked one element at a time: each element is handed to the arrived paths, then
+            // searched by the rest, and only that one element is ever held. Holding the whole list to
+            // search it afterwards made `**.items` keep every `items` list in memory.
+            if ($firstChar === '[' && $active !== [] && $this->allWalkLeafLists($arrived)) {
+                yield from $this->walkListForCursors($stream, $arrived, $active, $filePath, $matched, $level);
 
                 return;
             }
@@ -1383,12 +1438,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // Paths that go on below this node — `a` and `a.0.b` together — were dropped here: the
             // value is consumed once, and they never saw it, so a path plainly in the document was
             // reported missing. They walk the scanned copy instead of the stream.
-            if ($active !== []) {
+            if ($active !== [] && ($firstChar === '{' || $firstChar === '[')) {
                 $copy = new JsonStream(new StringSource($raw, $filePath));
                 try {
                     $copyFirst = $this->readNonWhitespaceChar($copy);
                     if ($copyFirst !== null) {
-                        yield from $this->walkCursors($copy, $copyFirst, $active, $filePath, $matched);
+                        yield from $this->walkCursors($copy, $copyFirst, $active, $filePath, $matched, $level);
                     }
                 } finally {
                     $copy->close();
@@ -1399,13 +1454,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if ($firstChar === '{') {
-            yield from $this->walkCursorsInObject($stream, $active, $filePath, $matched);
+            yield from $this->walkCursorsInObject($stream, $active, $filePath, $matched, $level);
 
             return;
         }
 
         if ($firstChar === '[') {
-            yield from $this->walkCursorsInList($stream, $active, $filePath, $matched);
+            yield from $this->walkCursorsInList($stream, $active, $filePath, $matched, $level);
 
             return;
         }
@@ -1414,7 +1469,352 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * @param array<int, array{segments: array<int, string>, depth: int, label: string}> $cursors
+     * The cursors standing on a node, with every `**` also taken as spanning no level at all: a cursor
+     * at `**` stays — it goes on into every child — and a copy of it moves to the name after `**`, to
+     * be matched against this node's own children. Two ways to one place are one cursor.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     *
+     * @return array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}>
+     */
+    private function expandRecursiveCursors(array $cursors): array
+    {
+        $expanded = [];
+        foreach ($cursors as $cursor) {
+            $expanded[$cursor['id'] . ':' . $cursor['depth']] = $cursor;
+            if (($cursor['segments'][$cursor['depth']] ?? null) === '**') {
+                $cursor['depth']++;
+                $expanded[$cursor['id'] . ':' . $cursor['depth']] = $cursor;
+            }
+        }
+
+        return array_values($expanded);
+    }
+
+    /**
+     * The cursors that go on into one child: `**` stays where it is, `*` and a matching name or index
+     * move one segment on, and the rest stop here.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param string|null $key the member's name, or the element's index as a string; null when no
+     *                         cursor here needs the name, which then was never decoded
+     *
+     * @return array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}>
+     */
+    private function cursorsIntoChild(array $cursors, string|null $key): array
+    {
+        $wanted = [];
+        foreach ($cursors as $cursor) {
+            $segment = $cursor['segments'][$cursor['depth']];
+            if ($segment === '**') {
+                $wanted[] = $cursor;
+            } elseif ($segment === '*' || $segment === $key) {
+                $cursor['depth']++;
+                $wanted[] = $cursor;
+            }
+        }
+
+        return $wanted;
+    }
+
+    /**
+     * Whether a child has anything to give these cursors. A scalar has nothing below it, so unless a
+     * path ends exactly on it, it is skipped without a walk — under `**` that is most values.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     */
+    private function worthWalking(array $cursors, string $valueFirst): bool
+    {
+        if ($cursors === []) {
+            return false;
+        }
+
+        if ($valueFirst === '{' || $valueFirst === '[') {
+            return true;
+        }
+
+        foreach ($cursors as $cursor) {
+            if ($cursor['depth'] >= count($cursor['segments'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a container the stream has just entered cannot hold anything these paths are after —
+     * decided from its raw bytes, so it can be skipped at the speed of a skipped branch instead of
+     * walked member by member.
+     *
+     * Every path ends on a name, and anything a path finds inside the container is a member by that
+     * name, so its key — `"email"` — is in the container's bytes. Bytes without it cannot hold a match.
+     * That holds only for a key written plainly: an escape could spell the same name differently, so
+     * a container with a backslash anywhere in it is walked. So is one that does not end within the
+     * block in hand, one a path ends ON, and one a path could reach by an index or `*`.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     */
+    private function holdsNoTarget(JsonStream $stream, array $cursors): bool
+    {
+        if ($stream->charBuffer !== []) {
+            return false;
+        }
+
+        // A path without `**` goes only where its names lead, so what it enters nearly always holds
+        // what it is after, and the look would cost more than it saves.
+        $recursive = false;
+        foreach ($cursors as $cursor) {
+            if ($cursor['needle'] === null || $cursor['depth'] >= count($cursor['segments'])) {
+                return false;
+            }
+
+            if ($cursor['segments'][$cursor['depth']] === '**') {
+                $recursive = true;
+            }
+        }
+
+        if (!$recursive) {
+            return false;
+        }
+
+        // The first place any of them — or a backslash — occurs ahead. If the container closes before
+        // that, none of them is inside it.
+        $limit = min($stream->bufLen, $stream->bufPos + 16384, $this->nextHit($stream, '\\'));
+        foreach ($cursors as $cursor) {
+            $limit = min($limit, $this->nextHit($stream, (string)$cursor['needle']));
+        }
+
+        return $this->containerClosesBefore($stream, $limit);
+    }
+
+    /**
+     * The bytes a path's last segment shows as a key written plainly — `"email"` — or null when it
+     * cannot be looked for that way: `*`, an index, or a name JSON would have to escape.
+     *
+     * @param array<int, string> $segments
+     */
+    private function needleFor(array $segments): string|null
+    {
+        $last = $segments === [] ? '*' : $segments[count($segments) - 1];
+        if ($last === '*' || ctype_digit($last) || preg_match('/["\\\\\x00-\x1f]/', $last) === 1) {
+            return null;
+        }
+
+        return '"' . $last . '"';
+    }
+
+    /**
+     * Where $needle next occurs in the block, at or after the read position; the block's length when
+     * it does not. Cached on the stream until the read position passes it.
+     */
+    private function nextHit(JsonStream $stream, string $needle): int
+    {
+        $at = $stream->nextHit[$needle] ?? -1;
+        if ($at < $stream->bufPos) {
+            $found = strpos($stream->buf, $needle, $stream->bufPos);
+            $at = $found === false ? $stream->bufLen : $found;
+            $stream->nextHit[$needle] = $at;
+        }
+
+        return $at;
+    }
+
+    /**
+     * Whether the container the stream has just entered closes before $limit. It only looks for the
+     * closing bracket: the skip that follows checks the structure.
+     */
+    private function containerClosesBefore(JsonStream $stream, int $limit): bool
+    {
+        $buf = $stream->buf;
+        $pos = $stream->bufPos;
+
+        // Without a closing bracket before $limit it cannot close there — one C-level look, and the
+        // usual answer when what is looked for sits near the container's start.
+        if (strcspn($buf, '}]', $pos, max(0, $limit - $pos)) >= $limit - $pos) {
+            return false;
+        }
+
+        $depth = 1;
+
+        while (true) {
+            $pos += strcspn($buf, '{}[]"', $pos, max(0, $limit - $pos));
+            if ($pos >= $limit) {
+                return false;
+            }
+
+            $char = $buf[$pos++];
+            if ($char === '"') {
+                // No backslash before $limit, so the next quote closes the string.
+                $quote = strpos($buf, '"', $pos);
+                if ($quote === false || $quote >= $limit) {
+                    return false;
+                }
+
+                $pos = $quote + 1;
+            } elseif ($char === '{' || $char === '[') {
+                $depth++;
+            } elseif (--$depth === 0) {
+                return true;
+            }
+        }
+    }
+
+    /**
+     * A scalar child: decoded once and paired with each path that ends on it, or skipped when none
+     * does. Not a generator — a scalar is too small a thing to set one up for.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param array<string, bool> $matched
+     *
+     * @return array<int, array{0: string, 1: mixed}>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function scalarForArrived(JsonStream $stream, string $valueFirst, array $cursors, string $filePath, array &$matched): array
+    {
+        $labels = [];
+        foreach ($cursors as $cursor) {
+            if ($cursor['depth'] >= count($cursor['segments'])) {
+                $labels[] = $cursor['label'];
+            }
+        }
+
+        if ($labels === []) {
+            $this->skipValue($stream, $valueFirst, $filePath);
+
+            return [];
+        }
+
+        foreach ($labels as $label) {
+            $matched[$label] = true;
+        }
+
+        $valueOffset = $stream->offset() - 1;
+        $raw = $this->scanValue($stream, $valueFirst, $filePath);
+        if ($this->onInvalidItem === null) {
+            $value = $this->decodeScannedValue($raw, $filePath, $stream);
+        } else {
+            try {
+                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException $exception) {
+                $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
+
+                return [];
+            }
+        }
+
+        $pairs = [];
+        foreach ($labels as $label) {
+            $pairs[] = [$label, $value];
+        }
+
+        return $pairs;
+    }
+
+    /**
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     */
+    private function allWalkLeafLists(array $cursors): bool
+    {
+        foreach ($cursors as $cursor) {
+            if (!$this->walksLeafList($cursor['segments'])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * A list some paths arrived at and others go on below: each element is decoded and handed to the
+     * arrived paths, then the others search a copy of that one element.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $arrived
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $active
+     * @param array<string, bool> $matched
+     *
+     * @return Generator<string, mixed>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function walkListForCursors(
+        JsonStream $stream,
+        array $arrived,
+        array $active,
+        string $filePath,
+        array &$matched,
+        int $level,
+    ): Generator {
+        $next = $this->readNonWhitespaceChar($stream);
+        if ($next === ']') {
+            return;
+        }
+
+        if ($next === null) {
+            throw new InvalidArgumentException(
+                $this->invalidJsonMessage($filePath, 'unexpected end of input in array.', $stream),
+            );
+        }
+
+        $stream->pushBack($next);
+        $index = 0;
+
+        while (true) {
+            $valueFirst = $this->readNonWhitespaceChar($stream);
+            if ($valueFirst === null) {
+                throw new InvalidArgumentException(
+                    $this->invalidJsonMessage($filePath, 'unexpected end of input in array value.', $stream),
+                );
+            }
+
+            $valueOffset = $stream->offset() - 1;
+            $raw = $this->scanValue($stream, $valueFirst, $filePath);
+
+            $valid = true;
+            try {
+                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException $exception) {
+                $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $filePath);
+                $valid = false;
+                $value = null;
+            }
+
+            if ($valid) {
+                foreach ($arrived as $cursor) {
+                    yield $cursor['label'] => $value;
+                }
+
+                $wanted = $this->cursorsIntoChild($active, (string)$index);
+                if ($this->worthWalking($wanted, $valueFirst)) {
+                    $copy = new JsonStream(new StringSource($raw, $filePath));
+                    try {
+                        $copyFirst = $this->readNonWhitespaceChar($copy);
+                        if ($copyFirst !== null) {
+                            yield from $this->walkCursors($copy, $copyFirst, $wanted, $filePath, $matched, $level + 1);
+                        }
+                    } finally {
+                        $copy->close();
+                    }
+                }
+            }
+
+            $index++;
+            $delimiter = $this->readNonWhitespaceChar($stream);
+            if ($delimiter === ']') {
+                return;
+            }
+
+            if ($delimiter !== ',') {
+                throw new InvalidArgumentException(
+                    $this->invalidJsonMessage($filePath, 'expected "," or "]" in array.', $stream),
+                );
+            }
+        }
+    }
+
+    /**
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
      * @param array<string, bool> $matched
      *
      * @return Generator<string, mixed>
@@ -1426,6 +1826,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         array $cursors,
         string $filePath,
         array &$matched,
+        int $level,
     ): Generator {
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === '}') {
@@ -1444,7 +1845,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // without being copied or decoded, as walkWildcardObject() does for a single path.
         $needsKey = false;
         foreach ($cursors as $cursor) {
-            if ($cursor['segments'][$cursor['depth']] !== '*') {
+            $segment = $cursor['segments'][$cursor['depth']];
+            if ($segment !== '*' && $segment !== '**') {
                 $needsKey = true;
 
                 break;
@@ -1481,20 +1883,22 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $valueFirst = $this->skipObjectKey($stream, $keyFirst, $filePath);
             }
 
-            $wanted = [];
-            foreach ($cursors as $cursor) {
-                // `*` walks every member of an object as it walks every element of a list.
-                $segment = $cursor['segments'][$cursor['depth']];
-                if ($segment === '*' || $segment === $key) {
-                    $cursor['depth']++;
-                    $wanted[] = $cursor;
-                }
-            }
+            $wanted = $this->cursorsIntoChild($cursors, $key);
 
             if ($wanted === []) {
                 $this->skipValue($stream, $valueFirst, $filePath);
+            } elseif ($valueFirst === '{' || $valueFirst === '[') {
+                if ($this->holdsNoTarget($stream, $wanted)) {
+                    $this->skipValue($stream, $valueFirst, $filePath);
+                } else {
+                    yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1);
+                }
             } else {
-                yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched);
+                // A scalar has nothing below it: hand it to the paths that end here, or skip it,
+                // without a walk of its own — under `**` that is most of the values in a document.
+                foreach ($this->scalarForArrived($stream, $valueFirst, $wanted, $filePath, $matched) as [$label, $value]) {
+                    yield $label => $value;
+                }
             }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
@@ -1511,7 +1915,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * @param array<int, array{segments: array<int, string>, depth: int, label: string}> $cursors
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
      * @param array<string, bool> $matched
      *
      * @return Generator<string, mixed>
@@ -1523,6 +1927,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         array $cursors,
         string $filePath,
         array &$matched,
+        int $level,
     ): Generator {
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === ']') {
@@ -1546,20 +1951,22 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
-            $wanted = [];
-            foreach ($cursors as $cursor) {
-                $segment = $cursor['segments'][$cursor['depth']];
-
-                if ($segment === '*' || ($segment === (string)$index)) {
-                    $cursor['depth']++;
-                    $wanted[] = $cursor;
-                }
-            }
+            $wanted = $this->cursorsIntoChild($cursors, (string)$index);
 
             if ($wanted === []) {
                 $this->skipValue($stream, $valueFirst, $filePath);
+            } elseif ($valueFirst === '{' || $valueFirst === '[') {
+                if ($this->holdsNoTarget($stream, $wanted)) {
+                    $this->skipValue($stream, $valueFirst, $filePath);
+                } else {
+                    yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1);
+                }
             } else {
-                yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched);
+                // A scalar has nothing below it: hand it to the paths that end here, or skip it,
+                // without a walk of its own — under `**` that is most of the values in a document.
+                foreach ($this->scalarForArrived($stream, $valueFirst, $wanted, $filePath, $matched) as [$label, $value]) {
+                    yield $label => $value;
+                }
             }
 
             $delimiter = $this->readNonWhitespaceChar($stream);
@@ -2566,7 +2973,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $segments = $this->splitAndValidateKeyPath($keyPath);
-        if (in_array('*', $segments, true)) {
+        if (in_array('*', $segments, true) || in_array('**', $segments, true)) {
             throw new InvalidArgumentException(sprintf(
                 'Key path "%s" has a wildcard and names many values; read them with readGenerator().',
                 $this->describeKeyPath($keyPath),
