@@ -47,6 +47,15 @@ final class ReadmeExamplesTest extends TestCase
         $scriptPath = $this->workingDirectory . '/block.php';
         file_put_contents($scriptPath, $script);
 
+        // A recipe for a library this one does not depend on, or that needs a network, cannot run here;
+        // it is still checked as PHP, so a typo in it fails the build like any other block.
+        if (str_starts_with(ltrim($block), '// Recipe:')) {
+            $lint = (string)shell_exec(sprintf('%s -l %s 2>&1', escapeshellarg(PHP_BINARY), escapeshellarg($scriptPath)));
+            self::assertStringContainsString('No syntax errors', $lint, "the recipe is not valid PHP:\n" . $lint);
+
+            return;
+        }
+
         $output = (string)shell_exec(sprintf(
             'cd %s && %s -d display_errors=1 -d error_reporting=E_ALL %s 2>&1',
             escapeshellarg($this->workingDirectory),

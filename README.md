@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.14.0
+composer require michaelalexeevweb/php-json-chunk:^1.15.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -320,6 +320,64 @@ clear that a stream is what you meant.
 *(Earlier versions of this file said wrappers were refused because the reader "seeks and re-reads
 within the file". It never did. The restriction was `is_file()`, and it is gone.)*
 
+#### Bytes that arrive in pieces: `IterableSource`
+
+Anything that can be iterated for strings is a source — a generator reading a socket or a
+decompressor, an HTTP client's stream of a response. The pieces are read as they come, never
+gathered, and can be any size:
+
+```php
+use PhpJsonChunk\Source\IterableSource;
+
+$pieces = (function () {
+    yield '{"items":[{"id"';
+    yield ':1},{"id":2}]}';
+})();
+
+foreach ($reader->readGenerator(new IterableSource($pieces, 'the socket'), keyPath: 'items') as $item) {
+    echo $item['id'], PHP_EOL;
+}
+```
+
+#### Straight from an HTTP response
+
+The response is read as it arrives; a 2 GB export never has to be downloaded first. With Guzzle, the
+body becomes a PHP stream:
+
+```php
+// Recipe: needs guzzlehttp/guzzle and a network — checked for syntax by the tests, not run.
+use GuzzleHttp\Client;
+use GuzzleHttp\Psr7\StreamWrapper;
+use PhpJsonChunk\Source\StreamSource;
+
+$response = (new Client())->get('https://api.example.com/export', ['stream' => true]);
+$handle = StreamWrapper::getResource($response->getBody());
+
+foreach ($reader->readGenerator(new StreamSource($handle, 'the export'), keyPath: 'data') as $record) {
+    // one record at a time, while the rest is still on its way
+}
+```
+
+With Symfony HttpClient, the response streams in chunks:
+
+```php
+// Recipe: needs symfony/http-client and a network — checked for syntax by the tests, not run.
+use PhpJsonChunk\Source\IterableSource;
+use Symfony\Component\HttpClient\HttpClient;
+
+$client = HttpClient::create();
+$response = $client->request('GET', 'https://api.example.com/export');
+$pieces = (function () use ($client, $response) {
+    foreach ($client->stream($response) as $chunk) {
+        yield $chunk->getContent();
+    }
+})();
+
+foreach ($reader->readGenerator(new IterableSource($pieces, 'the export'), keyPath: 'data') as $record) {
+    // ...
+}
+```
+
 ## What else it does
 
 ### Objects, not only arrays
@@ -346,6 +404,26 @@ $reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key conta
 
 `'*'` means "every element of this list" in both forms — never a member named `"*"`. The list form
 also reaches a key that is the empty string: `['', 'items']`.
+
+### JSON Pointer
+
+A path written for JsonMachine, or any tool that speaks RFC 6901, works through `JsonPointer`, which
+reads the pointer into segments:
+
+```php
+use PhpJsonChunk\JsonPointer;
+use PhpJsonChunk\Source\StringSource;
+
+$orders = new StringSource('{"orders":[{"sku":"A-17"},{"sku":"B-4"}]}');
+
+foreach ($reader->readGenerator($orders, keyPath: JsonPointer::segments('/orders/-/sku')) as $sku) {
+    echo $sku, PHP_EOL;   // A-17, B-4
+}
+```
+
+`~1` is a slash and `~0` a tilde, as the RFC has it; `-` is every element of a list, as JsonMachine reads
+it; `''` is the whole document. A segment `*` or `**` keeps its wildcard meaning, so a member literally
+named `*` stays out of reach — by a pointer or otherwise.
 
 ### Several paths in one pass
 

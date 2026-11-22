@@ -3,6 +3,14 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.15.0 — 2026-11-22
+
+### Added
+
+- **`JsonPointer::segments()`** reads an RFC 6901 JSON Pointer into a key path, so a path written for JsonMachine or any other tool that speaks it works unchanged: `keyPath: JsonPointer::segments('/orders/-/sku')`. `~1` is a slash and `~0` a tilde; `-` is every element of a list, as JsonMachine reads it; `''` is the whole document. A pointer is converted explicitly rather than recognised by its leading `/`, because a dotted path starting with `/` already means a member named that way.
+- **`IterableSource`**, a source for bytes that arrive in pieces: anything that can be iterated for strings — a generator reading a socket or a decompressor, an HTTP client's stream of a response. The pieces are read as they come, never gathered, and can be any size.
+- **Recipes for reading straight from an HTTP response**, with Guzzle and with Symfony HttpClient. The test suite checks them as PHP; running them needs those libraries and a network.
+
 ## 1.14.0 — 2026-11-22
 
 ### Faster
