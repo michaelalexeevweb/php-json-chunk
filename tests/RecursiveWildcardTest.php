@@ -90,6 +90,72 @@ final class RecursiveWildcardTest extends TestCase
         self::assertSame(['next'], $this->values('{"big":[' . $filler . '],"after":{"email":"next"}}', '**.email'));
     }
 
+    /**
+     * `**` and readPaths() decode a run of elements, or of members, at once and walk them decoded. A
+     * repeated name collapsed by json_decode() would change what they find, so the walk counts the
+     * names it passes against the run's bytes. Each trap below sits in the middle of a long run; every
+     * read must equal the elements read one at a time.
+     *
+     * @return iterable<string, array{0: callable(int): string, 1: array<int, string>}>
+     */
+    public static function runTraps(): iterable
+    {
+        $plain = static fn(int $i): string => '{"id":' . $i . ',"e":' . $i . ',"tags":["a"]}';
+        $trap = static fn(string $element): callable => static fn(int $i): string => $i === 25 ? $element : $plain($i);
+
+        yield 'a repeated name' => [$trap('{"e":"first","e":"second"}'), ['**.e']];
+        yield 'a repeated key holding the name' => [$trap('{"x":{"e":1},"x":{"e":2}}'), ['**.e']];
+        yield 'the name spelled with an escape' => [$trap('{"\u0065":"esc","e":"plain"}'), ['**.e']];
+        yield 'the name as a string value' => [$trap('{"k":"e","e":5}'), ['**.e']];
+        yield 'a match inside a match' => [$trap('{"e":{"e":{"e":1}}}'), ['**.e']];
+        yield 'a backslash, and a repeated name' => [$trap('{"s":"a\\b","e":1,"e":2}'), ['**.e']];
+        yield 'two paths, one repeated' => [$trap('{"e":1,"e":2,"tags":["b"]}'), ['**.e', '*.tags']];
+        yield 'a path ending on a list' => [$trap('{"tags":["x"],"tags":["y"]}'), ['**.tags']];
+        yield 'no **: several plain paths, one repeated' => [$trap('{"id":1,"e":1,"e":2}'), ['*.e', '*.id']];
+    }
+
+    /**
+     * @param callable(int): string $element
+     * @param array<int, string> $paths
+     */
+    #[DataProvider('runTraps')]
+    public function testARunWithATrapReadsAsOneElementAtATimeDoes(callable $element, array $paths): void
+    {
+        $elements = [];
+        for ($i = 0; $i < 60; $i++) {
+            $elements[] = $element($i);
+        }
+
+        $read = static function (string $document) use ($paths): array {
+            $pairs = [];
+            try {
+                foreach ((new JsonChunkReader())->readPaths(new StringSource($document), $paths) as $path => $value) {
+                    $pairs[] = [$path, $value];
+                }
+            } catch (RuntimeException) {
+                // A piece without a match gives nothing; readPaths() names the paths it missed.
+            }
+
+            return $pairs;
+        };
+
+        // A list, and an object keyed by id — each element read on its own is what the whole must give.
+        foreach (['list' => ['[', ']', static fn(int $i, string $e): string => $e], 'map' => ['{', '}', static fn(int $i, string $e): string => '"k' . $i . '":' . $e]] as $shape => [$open, $close, $wrap]) {
+            $expected = [];
+            foreach ($elements as $i => $one) {
+                array_push($expected, ...$read($open . $wrap($i, $one) . $close));
+            }
+
+            $whole = $open . implode(',', array_map($wrap, array_keys($elements), $elements)) . $close;
+            self::assertSame($expected, $read($whole), $shape);
+
+            if (count($paths) === 1) {
+                $values = array_map(static fn(array $pair): mixed => $pair[1], $expected);
+                self::assertSame($values, iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($whole), keyPath: $paths[0]), false), $shape . ' readGenerator');
+            }
+        }
+    }
+
     public function testTwoWaysToOneNodeYieldItOnce(): void
     {
         self::assertSame(['x'], $this->values('{"a":{"a":{"b":"x"}}}', '**.a.**.b'));

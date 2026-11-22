@@ -3,6 +3,26 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.16.0 — 2026-11-23
+
+### Faster
+
+**`**` and `readPaths()` are two to three times faster.** A profile showed where their time went: each element was decoded on its own, checked on its own for a repeated name — a regex and a walk of every member — and walked with its cursors worked out afresh at every node, though under `**` every element of a list has the same cursors. Now:
+
+- **They decode runs**, of a list's elements or an object's members, as the other reads have since 1.10.0 and 1.14.0.
+- **The repeated-name check comes free under `**`.** The decoded walk passes every member anyway, so it counts the members named like a segment of the paths as it goes; one `substr_count()` per name on the run's bytes then shows whether `json_decode()` collapsed one. When the two differ — a repeated name, an escaped spelling, the name as a string value — the run is walked from its bytes the stream way, and what the decoded walk found is dropped unseen. Without `**`, a run gets the whole-run check once, not each element.
+- **What a node's cursors do is worked out once per kind of node**, and remembered while the list is read: `**` expanded, the cursors that end there and those that go on, which child each name leads to, which paths end on which scalar. A list of a million alike elements is planned once. The memory for it is bounded.
+
+| 200 000 records (20 MB) | 1.15.0 | now |
+|---|---:|---:|
+| `**.email` | 2.23 s | 0.86 s |
+| `**.tags` | 3.00 s | 1.21 s |
+| `**.zzz`, a name that is not there | 1.36 s | 0.79 s |
+| `**.email` over an object keyed by id | 2.47 s | 1.04 s |
+| `readPaths()`, two paths | 1.60 s | 0.86 s |
+
+Peak memory under `**` is 0.22–0.33 MB.
+
 ## 1.15.0 — 2026-11-22
 
 ### Added

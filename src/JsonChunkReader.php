@@ -19,6 +19,21 @@ use SplFileObject;
 use stdClass;
 use Throwable;
 
+/**
+ * @phpstan-type Cursor array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}
+ * @phpstan-type NodePlan array{
+ *     cursors: array<int, Cursor>,
+ *     arrived: array<int, Cursor>,
+ *     active: array<int, Cursor>,
+ *     activeSignature: string,
+ *     leafLists: bool,
+ *     endsOnAny: bool,
+ *     endsOn: array<string, bool>,
+ *     indexFree: bool,
+ *     kids: array<string, array{0: array<int, Cursor>, 1: string}>,
+ *     labels: array<string, array<int, string>>,
+ * }
+ */
 final class JsonChunkReader implements JsonChunkReaderInterface
 {
     /**
@@ -1602,12 +1617,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function expandRecursiveCursors(array $cursors): array
     {
+        // Keyed by path and depth — an int, as a path has at most 512 segments — so two ways to one
+        // place are one cursor.
         $expanded = [];
         foreach ($cursors as $cursor) {
-            $expanded[$cursor['id'] . ':' . $cursor['depth']] = $cursor;
+            $expanded[$cursor['id'] * 1024 + $cursor['depth']] = $cursor;
             if (($cursor['segments'][$cursor['depth']] ?? null) === '**') {
                 $cursor['depth']++;
-                $expanded[$cursor['id'] . ':' . $cursor['depth']] = $cursor;
+                $expanded[$cursor['id'] * 1024 + $cursor['depth']] = $cursor;
             }
         }
 
@@ -1875,44 +1892,308 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * The names to count during a decoded walk of a run, each at 0 — the named segments the paths have
+     * left — or null when counting cannot stand in for the whole-run check: without `**` the walk does
+     * not pass every member, and with a backslash in the run a name could be spelled unseen.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     *
+     * @return array<string, int>|null
+     */
+    private function namesToCount(array $cursors, string $raw): array|null
+    {
+        $recursive = false;
+        foreach ($cursors as $cursor) {
+            if (($cursor['segments'][$cursor['depth']] ?? null) === '**') {
+                $recursive = true;
+            }
+        }
+
+        if (!$recursive || str_contains($raw, '\\')) {
+            return null;
+        }
+
+        $seen = [];
+        foreach ($cursors as $cursor) {
+            for ($index = $cursor['depth'], $count = count($cursor['segments']); $index < $count; $index++) {
+                $segment = $cursor['segments'][$index];
+                if ($segment === '*' || $segment === '**') {
+                    continue;
+                }
+
+                if (preg_match('/["\x00-\x1f]/', $segment) === 1) {
+                    return null;
+                }
+
+                $seen[$segment] = 0;
+            }
+        }
+
+        return $seen;
+    }
+
+    /**
+     * Whether a decoded walk that counted $seen passed every one of those names the run's bytes hold.
+     *
+     * @param array<string, int> $seen
+     */
+    private function countedAll(array $seen, string $raw): bool
+    {
+        foreach ($seen as $name => $times) {
+            if (substr_count($raw, '"' . $name . '"') !== $times) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * A run of an object's members, decoded at once as objects and walked by the object's cursors as
+     * if it were that object — the same members, in the same order. A repeated key among the members
+     * already kept the run from being taken; one inside them is caught as for a list run.
+     *
+     * @param array<int|string, mixed> $members
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param array<string, bool> $matched
+     * @param array<string, NodePlan> $memo
+     *
+     * @return array<int, array{0: string, 1: mixed}>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function followMemberRun(array $members, string $raw, array $cursors, string $filePath, array &$matched, int $level, array &$memo): array
+    {
+        $seen = $this->namesToCount($cursors, $raw);
+        $pairs = [];
+        $walkMatched = $matched;
+        $safe = $seen !== null;
+        if (!$safe) {
+            $stripped = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '', $raw);
+            $safe = $stripped !== null && substr_count($stripped, ':') === count($members) + $this->memberCount($members);
+        }
+
+        if ($safe) {
+            $this->followCursorsDecoded((object)$members, $cursors, $walkMatched, $pairs, $seen, $memo);
+            if ($seen === null || $this->countedAll($seen, $raw)) {
+                $matched = $walkMatched;
+
+                return $pairs;
+            }
+        }
+
+        $pairs = [];
+        $copy = $this->newStream(new StringSource('{' . $raw . '}', $filePath));
+        try {
+            $this->readNonWhitespaceChar($copy);
+            foreach ($this->walkCursorsInObject($copy, $cursors, $filePath, $matched, $level, false) as $label => $value) {
+                $pairs[] = [(string)$label, $value];
+            }
+        } finally {
+            $copy->close();
+        }
+
+        return $pairs;
+    }
+
+    /**
+     * A run of list elements, decoded at once as objects, walked by the cursors that go into each — the
+     * `[label, value]` pairs walkCursorsInList() would have yielded for them, in order.
+     *
+     * The run must not have lost a member to a repeated name. Under `**` the decoded walk visits every
+     * member anyway, so it counts the members named like a segment of the paths as it goes, and those
+     * are checked against the same names counted in the run's bytes — one substr_count() each. A
+     * repeated name collapsed by json_decode(), an escaped spelling, the name as a string value: each
+     * makes the two differ. Without `**` the whole-run check is used. A run that fails either is walked
+     * from its bytes the stream way, and what the decoded walk found is dropped unseen.
+     *
+     * @param array<int, mixed> $run
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors the list's
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $wanted each element's
+     * @param array<string, bool> $matched
+     * @param array<string, NodePlan> $memo
+     *
+     * @return array<int, array{0: string, 1: mixed}>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function followCursorRun(array $run, string $raw, array $cursors, array $wanted, string $filePath, array &$matched, int $level, array &$memo): array
+    {
+        $seen = $this->namesToCount($wanted, $raw);
+        $pairs = [];
+        $walkMatched = $matched;
+        if ($seen !== null || $this->repeatsNoName($raw, $run)) {
+            foreach ($run as $element) {
+                $this->followCursorsDecoded($element, $wanted, $walkMatched, $pairs, $seen, $memo);
+            }
+
+            if ($seen === null || $this->countedAll($seen, $raw)) {
+                $matched = $walkMatched;
+
+                return $pairs;
+            }
+        }
+
+        $pairs = [];
+        $copy = $this->newStream(new StringSource('[' . $raw . ']', $filePath));
+        try {
+            $this->readNonWhitespaceChar($copy);
+            foreach ($this->walkCursorsInList($copy, $cursors, $filePath, $matched, $level, false) as $label => $value) {
+                $pairs[] = [(string)$label, $value];
+            }
+        } finally {
+            $copy->close();
+        }
+
+        return $pairs;
+    }
+
+    /**
      * walkCursors(), over a value already decoded with objects as stdClass: the same cursors, the same
      * matches, in the same order, collected as `[label, value]` pairs.
      *
      * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
      * @param array<string, bool> $matched
      * @param array<int, array{0: string, 1: mixed}> $pairs
+     * @param array<string, int>|null $seen members named like a path segment, counted as they are passed
+     * @param array<string, NodePlan> $memo node plans, kept across the elements of a list
      */
-    private function followCursorsDecoded(mixed $node, array $cursors, array &$matched, array &$pairs): void
+    private function followCursorsDecoded(
+        mixed $node,
+        array $cursors,
+        array &$matched,
+        array &$pairs,
+        array|null &$seen = null,
+        array &$memo = [],
+    ): void {
+        $this->followPlanned($node, $this->cursorSignature($cursors), $cursors, $matched, $pairs, $seen, $memo);
+    }
+
+    /**
+     * The cursors' identity — which path, how far along — as a string: two nodes with the same
+     * signature are walked the same way, so the work of finding out how is done once.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     */
+    private function cursorSignature(array $cursors): string
+    {
+        $signature = '';
+        foreach ($cursors as $cursor) {
+            $signature .= ($cursor['id'] * 1024 + $cursor['depth']) . ',';
+        }
+
+        return $signature;
+    }
+
+    /**
+     * What a node's cursors do, worked out once per signature: `**` expanded, the cursors split into
+     * those that end here and those that go on, and which paths end on a scalar child by which name.
+     * Under `**` every element of a list has the same cursors, so a list of a million elements is
+     * planned once, not a million times.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     *
+     * @return NodePlan
+     */
+    private function planFor(array $cursors): array
     {
         $cursors = $this->expandRecursiveCursors($cursors);
         $arrived = [];
         $active = [];
+        $endsOnAny = false;
+        $endsOn = [];
+        $indexFree = true;
         foreach ($cursors as $cursor) {
             if ($cursor['depth'] >= count($cursor['segments'])) {
                 $arrived[] = $cursor;
-            } else {
-                $active[] = $cursor;
+
+                continue;
+            }
+
+            $active[] = $cursor;
+            $segment = $cursor['segments'][$cursor['depth']];
+            if (ctype_digit($segment)) {
+                $indexFree = false;
+            }
+
+            if ($cursor['depth'] + 1 === count($cursor['segments'])) {
+                if ($segment === '*') {
+                    $endsOnAny = true;
+                } elseif ($segment !== '**') {
+                    $endsOn[$segment] = true;
+                }
             }
         }
 
+        return [
+            'cursors' => $cursors,
+            'arrived' => $arrived,
+            'active' => $active,
+            'activeSignature' => $this->cursorSignature($active),
+            'leafLists' => $arrived !== [] && $this->allWalkLeafLists($arrived),
+            'endsOnAny' => $endsOnAny,
+            'endsOn' => $endsOn,
+            'indexFree' => $indexFree,
+            'kids' => [],
+            'labels' => [],
+        ];
+    }
+
+    /**
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param array<string, bool> $matched
+     * @param array<int, array{0: string, 1: mixed}> $pairs
+     * @param array<string, int>|null $seen
+     * @param array<string, NodePlan> $memo
+     */
+    private function followPlanned(
+        mixed $node,
+        string $signature,
+        array $cursors,
+        array &$matched,
+        array &$pairs,
+        array|null &$seen,
+        array &$memo,
+    ): void {
+        if (!array_key_exists($signature, $memo)) {
+            // A document of ever new shapes must not grow the memo without end.
+            if (count($memo) >= 1024) {
+                $memo = [];
+            }
+
+            $memo[$signature] = $this->planFor($cursors);
+        }
+
+        $plan = &$memo[$signature];
         $isList = is_array($node);
         $isContainer = $isList || $node instanceof stdClass;
 
-        if ($arrived !== []) {
-            foreach ($arrived as $cursor) {
+        if ($plan['arrived'] !== []) {
+            foreach ($plan['arrived'] as $cursor) {
                 $matched[$cursor['label']] = true;
             }
 
-            if ($isList && $active !== [] && $this->allWalkLeafLists($arrived)) {
+            if ($isList && $plan['active'] !== [] && $plan['leafLists']) {
                 foreach ($node as $index => $element) {
                     $value = $this->asConfigured($element);
-                    foreach ($arrived as $cursor) {
+                    foreach ($plan['arrived'] as $cursor) {
                         $pairs[] = [$cursor['label'], $value];
                     }
 
-                    $wanted = $this->cursorsIntoChild($active, (string)$index);
-                    if ($wanted !== []) {
-                        $this->followCursorsDecoded($element, $wanted, $matched, $pairs);
+                    // As for any child: worked out once when no path names an index.
+                    $kidKey = $plan['indexFree'] ? '[]active' : '[active' . $index;
+                    if (!array_key_exists($kidKey, $plan['kids'])) {
+                        $wanted = $this->cursorsIntoChild($plan['active'], (string)$index);
+                        $kid = [$wanted, $this->cursorSignature($wanted)];
+                        if (count($plan['kids']) < 256) {
+                            $plan['kids'][$kidKey] = $kid;
+                        }
+                    } else {
+                        $kid = $plan['kids'][$kidKey];
+                    }
+
+                    if ($kid[0] !== []) {
+                        $this->followPlanned($element, $kid[1], $kid[0], $matched, $pairs, $seen, $memo);
                     }
                 }
 
@@ -1920,7 +2201,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             $value = $this->asConfigured($node);
-            foreach ($arrived as $cursor) {
+            foreach ($plan['arrived'] as $cursor) {
                 if ($isList && $this->walksLeafList($cursor['segments'])) {
                     foreach ($value as $item) {
                         $pairs[] = [$cursor['label'], $item];
@@ -1932,8 +2213,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $pairs[] = [$cursor['label'], $value];
             }
 
-            if ($active !== [] && $isContainer) {
-                $this->followCursorsDecoded($node, $active, $matched, $pairs);
+            if ($plan['active'] !== [] && $isContainer) {
+                $this->followPlanned($node, $plan['activeSignature'], $plan['active'], $matched, $pairs, $seen, $memo);
             }
 
             return;
@@ -1944,23 +2225,56 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         foreach ($isList ? $node : get_object_vars($node) as $key => $child) {
+            $key = (string)$key;
+            if (!$isList && $seen !== null && array_key_exists($key, $seen)) {
+                $seen[$key]++;
+            }
+
             if (is_array($child) || $child instanceof stdClass) {
-                $wanted = $this->cursorsIntoChild($cursors, (string)$key);
-                if ($wanted !== []) {
-                    $this->followCursorsDecoded($child, $wanted, $matched, $pairs);
+                // The cursors a child gets depend on its name — or, in a list no path indexes, on
+                // nothing at all; either way they are worked out once and remembered.
+                $kidKey = $isList && $plan['indexFree'] ? '[]' : ($isList ? '[' . $key : '{' . $key);
+                if (!array_key_exists($kidKey, $plan['kids'])) {
+                    $wanted = $this->cursorsIntoChild($plan['cursors'], $key);
+                    $kid = [$wanted, $this->cursorSignature($wanted)];
+                    if (count($plan['kids']) < 256) {
+                        $plan['kids'][$kidKey] = $kid;
+                    }
+                } else {
+                    $kid = $plan['kids'][$kidKey];
+                }
+
+                if ($kid[0] !== []) {
+                    $this->followPlanned($child, $kid[1], $kid[0], $matched, $pairs, $seen, $memo);
                 }
 
                 continue;
             }
 
-            // A scalar holds nothing: the one question is which paths end on it — those whose
-            // segment here is `*` or its name, and is their last.
-            foreach ($cursors as $cursor) {
-                $segment = $cursor['segments'][$cursor['depth']];
-                if ($cursor['depth'] + 1 === count($cursor['segments']) && ($segment === '*' || $segment === (string)$key)) {
-                    $matched[$cursor['label']] = true;
-                    $pairs[] = [$cursor['label'], $child];
+            // A scalar holds nothing: the one question is which paths end on it.
+            if (!$plan['endsOnAny'] && !array_key_exists($key, $plan['endsOn'])) {
+                continue;
+            }
+
+            if (!array_key_exists($key, $plan['labels'])) {
+                // In cursor order, as the stream walk hands them over.
+                $labels = [];
+                foreach ($plan['cursors'] as $cursor) {
+                    $segment = $cursor['segments'][$cursor['depth']] ?? null;
+                    if ($cursor['depth'] + 1 === count($cursor['segments']) && ($segment === '*' || $segment === $key)) {
+                        $labels[] = $cursor['label'];
+                    }
                 }
+
+                if (count($plan['labels']) >= 256) {
+                    $plan['labels'] = [];
+                }
+                $plan['labels'][$key] = $labels;
+            }
+
+            foreach ($plan['labels'][$key] as $label) {
+                $matched[$label] = true;
+                $pairs[] = [$label, $child];
             }
         }
     }
@@ -2132,7 +2446,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $filePath,
         array &$matched,
         int $level,
+        bool $runs = true,
     ): Generator {
+        $memo = [];
+        $runDepth = min(512, self::MAX_RECURSIVE_DEPTH + 2 - ($level + 1)) + 1;
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === '}') {
             return;
@@ -2164,6 +2481,25 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 throw new InvalidArgumentException(
                     $this->invalidJsonMessage($filePath, 'object key must be a string.', $stream),
                 );
+            }
+
+            if ($runs && $runDepth > 2 && ($members = $this->decodeMemberRunFast($stream, false, $runRaw, $runDepth)) !== null) {
+                foreach ($this->followMemberRun($members, (string)$runRaw, $cursors, $filePath, $matched, $level, $memo) as [$label, $value]) {
+                    yield $label => $value;
+                }
+
+                $delimiter = $this->readNonWhitespaceChar($stream);
+                if ($delimiter === '}') {
+                    return;
+                }
+
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'expected "," or "}" in object.', $stream),
+                    );
+                }
+
+                continue;
             }
 
             if ($needsKey) {
@@ -2237,7 +2573,31 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $filePath,
         array &$matched,
         int $level,
+        bool $runs = true,
     ): Generator {
+        // Runs need every element to be walked by the same cursors: no path here may name an index.
+        $runWanted = null;
+        $memo = [];
+        if ($runs) {
+            $runWanted = [];
+            foreach ($cursors as $cursor) {
+                $segment = $cursor['segments'][$cursor['depth']];
+                if (ctype_digit($segment)) {
+                    $runWanted = null;
+
+                    break;
+                }
+
+                // What any element gets: `**` stays, `*` moves on; a name never matches an element.
+                if ($segment === '**') {
+                    $runWanted[] = $cursor;
+                } elseif ($segment === '*') {
+                    $cursor['depth']++;
+                    $runWanted[] = $cursor;
+                }
+            }
+        }
+
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === ']') {
             return;
@@ -2258,6 +2618,32 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 throw new InvalidArgumentException(
                     $this->invalidJsonMessage($filePath, 'unexpected end of input in array value.', $stream),
                 );
+            }
+
+            $runDepth = min(512, self::MAX_RECURSIVE_DEPTH + 2 - ($level + 1)) + 1;
+            if (
+                $runWanted !== null && $runWanted !== [] && ($valueFirst === '{' || $valueFirst === '[') && $runDepth > 2
+                && ($run = $this->decodeRunFast($stream, $valueFirst, false, $runRaw, $runDepth)) !== null
+            ) {
+                foreach ($this->followCursorRun($run, (string)$runRaw, $cursors, $runWanted, $filePath, $matched, $level, $memo) as [$label, $value]) {
+                    yield $label => $value;
+                }
+
+                $index += count($run) - 1;
+                $delimiter = $this->readNonWhitespaceChar($stream);
+                if ($delimiter === ']') {
+                    return;
+                }
+
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException(
+                        $this->invalidJsonMessage($filePath, 'expected "," or "]" in array.', $stream),
+                    );
+                }
+
+                $index++;
+
+                continue;
             }
 
             $wanted = $this->cursorsIntoChild($cursors, (string)$index);
@@ -3146,6 +3532,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         string $valueFirst,
         bool|null $associative = null,
         string|null &$raw = null,
+        int $maxDepth = 512,
     ): array|null {
         if (($valueFirst !== '{' && $valueFirst !== '[') || $stream->charBuffer !== []) {
             return null;
@@ -3161,7 +3548,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        $values = $this->decodesRun($stream, $valueFirst, $start, $associative ?? $this->associative, $raw);
+        $values = $this->decodesRun($stream, $valueFirst, $start, $associative ?? $this->associative, $raw, $maxDepth);
         if ($values !== null) {
             $stream->fastMisses = 0;
 
@@ -3181,7 +3568,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @return array<int, mixed>|null
      */
-    private function decodesRun(JsonStream $stream, string $valueFirst, int $start, bool $associative, string|null &$raw): array|null
+    private function decodesRun(JsonStream $stream, string $valueFirst, int $start, bool $associative, string|null &$raw, int $maxDepth = 512): array|null
     {
         $close = $valueFirst === '{' ? '}' : ']';
         $end = min($stream->bufLen, $start + self::RUN_BYTES);
@@ -3207,7 +3594,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             try {
                 $raw = substr($stream->buf, $start, $length);
-                $values = json_decode('[' . $raw . ']', $associative, 512, JSON_THROW_ON_ERROR);
+                $values = json_decode('[' . $raw . ']', $associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
             } catch (JsonException) {
                 return null;
             }
@@ -3236,8 +3623,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @return array<int|string, mixed>|null
      */
-    private function decodeMemberRunFast(JsonStream $stream, bool|null $associative = null, string|null &$raw = null): array|null
-    {
+    private function decodeMemberRunFast(
+        JsonStream $stream,
+        bool|null $associative = null,
+        string|null &$raw = null,
+        int $maxDepth = 512,
+    ): array|null {
         if ($stream->charBuffer !== [] || $stream->fastMisses >= 8) {
             return null;
         }
@@ -3251,7 +3642,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        $members = $this->decodesMemberRun($stream, $start, $associative ?? $this->associative, $raw);
+        $members = $this->decodesMemberRun($stream, $start, $associative ?? $this->associative, $raw, $maxDepth);
         if ($members !== null) {
             $stream->fastMisses = 0;
 
@@ -3268,7 +3659,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @return array<int|string, mixed>|null
      */
-    private function decodesMemberRun(JsonStream $stream, int $start, bool $associative, string|null &$raw): array|null
+    private function decodesMemberRun(JsonStream $stream, int $start, bool $associative, string|null &$raw, int $maxDepth = 512): array|null
     {
         $end = min($stream->bufLen, $start + self::RUN_BYTES);
         $searchFrom = $end - 2 - $stream->bufLen;
@@ -3290,7 +3681,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $raw = substr($stream->buf, $start, $length);
             try {
-                $decoded = json_decode('{' . $raw . '}', $associative, 512, JSON_THROW_ON_ERROR);
+                $decoded = json_decode('{' . $raw . '}', $associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
             } catch (JsonException) {
                 return null;
             }
