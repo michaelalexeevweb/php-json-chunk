@@ -3,6 +3,17 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.11.0 — 2026-11-22
+
+### Added
+
+- **`BlockSize`**, a constructor option: the block the source is read in, from `Kb8` to `Mb1`; `Kb64` stays the default. The block is most of what the reader holds, and an element is read the fast way only when it ends within the block in hand — so a smaller block holds less, and a larger one lets large elements be read fast. Elements of 186 KB: 1.95 s with the default block, 0.67 s with `Mb1`. A million small records: 0.17 MB with the default, 0.12 MB with `Kb16`, a few percent slower. The README has the full table.
+
+### Faster
+
+- **An element full of nested objects is read the fast way.** It has a `},` at every object inside it, and the fast read looked at the first four and gave up, so every such element went to the PHP scanner. It now counts the brackets up to each `},` it passes and stops where they balance. Elements of 10 KB, 400 nested objects each: 1.98 s → 0.68 s for 20 MB.
+- **Brackets inside strings no longer make a list slow.** Runs of elements could not balance across such strings, and each element retried its run eight times over 4 KB. A run of misses now stops the trying until the next block, as it already did for skipping. 100 000 records with `}` and `{{` in their strings: 4.6 s → 0.63 s.
+
 ## 1.10.0 — 2026-11-22
 
 ### Faster

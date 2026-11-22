@@ -106,6 +106,22 @@ final class BatchDecodeTest extends TestCase
         self::assertSame(8, $seen);
     }
 
+    /**
+     * Brackets inside strings keep every cut of a run unbalanced. After a few misses the runs are not
+     * tried for the rest of the block, and the elements are read one at a time — the same values.
+     */
+    public function testBracketsInsideStringsReadAsJsonDecodeDoes(): void
+    {
+        $records = [];
+        for ($i = 0; $i < 3000; $i++) {
+            $records[] = ['a' => '}', 'b' => '{{[', 'c' => $i % 7 === 0 ? '],{' : 'x', 'n' => $i];
+        }
+        $document = (string)json_encode($records);
+
+        self::assertSame($records, iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document))));
+        self::assertSame(array_column($records, 'n'), iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document), keyPath: '*.n'), false));
+    }
+
     public function testChunksCutAcrossRuns(): void
     {
         $document = (string)json_encode($this->records(100));

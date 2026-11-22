@@ -151,7 +151,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.10.0
+composer require michaelalexeevweb/php-json-chunk:^1.11.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -425,6 +425,39 @@ $reader->count($source);
 ```
 
 For a file, wrap a `FileSource`: `new FileSource(new SplFileObject($path, 'rb'), $path)`.
+
+### Block size: memory against speed
+
+The source is read in blocks, and the block is most of what the reader holds. An element is read the
+fast way — found and decoded in C — only when it ends within the block in hand; a bigger one is read by
+the PHP scanner, several times slower. `BlockSize` picks the trade, from 8 KB to 1 MB; the default,
+64 KB, suits most documents.
+
+```php
+use PhpJsonChunk\BlockSize;
+
+$lean = new JsonChunkReader(blockSize: BlockSize::Kb16);   // small records, every kilobyte counts
+$wide = new JsonChunkReader(blockSize: BlockSize::Mb1);    // elements of a hundred kilobytes and more
+```
+
+Measured on three 18–80 MB documents — a million small records, elements of 10 KB, elements of 186 KB:
+
+| `BlockSize` | small records | 10 KB elements | 186 KB elements |
+|---|---:|---:|---:|
+| `Kb8` | 615 ms · 0.12 MB | 2 035 ms · 0.43 MB | 1 944 ms · 7.8 MB |
+| `Kb16` | 564 ms · 0.12 MB | 1 503 ms · 0.64 MB | 2 004 ms · 7.8 MB |
+| `Kb32` | 511 ms · 0.14 MB | 955 ms · 0.66 MB | 2 048 ms · 7.8 MB |
+| **`Kb64`** (default) | 522 ms · 0.17 MB | 673 ms · 0.69 MB | 1 950 ms · 7.9 MB |
+| `Kb128` | 497 ms · 0.31 MB | 537 ms · 0.75 MB | 1 974 ms · 7.9 MB |
+| `Kb256` | 491 ms · 0.57 MB | 462 ms · 0.88 MB | 1 557 ms · 12.0 MB |
+| `Kb512` | 489 ms · 1.04 MB | 434 ms · 1.24 MB | 968 ms · 12.3 MB |
+| `Mb1` | 489 ms · 2.04 MB | 410 ms · 2.24 MB | 674 ms · 12.8 MB |
+
+- **Small records** barely care: a smaller block saves a few hundredths of a megabyte, a larger one a few
+  percent of time.
+- **Large elements** care a lot: once the block is bigger than the element, it is read three times
+  faster. With elements of 186 KB, memory is the elements themselves — 7.8 MB decoded — whatever the
+  block.
 
 ### When something is wrong
 

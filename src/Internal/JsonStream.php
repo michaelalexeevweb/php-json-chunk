@@ -30,7 +30,7 @@ use PhpJsonChunk\Contract\JsonSourceInterface;
  */
 final class JsonStream
 {
-    /** Size of each read block in bytes. */
+    /** Size of each read block in bytes, unless the reader is given another. */
     public const BLOCK_SIZE = 65536;
 
     /**
@@ -78,7 +78,7 @@ final class JsonStream
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
 
-    public function __construct(JsonSourceInterface $source)
+    public function __construct(JsonSourceInterface $source, private readonly int $blockSize = self::BLOCK_SIZE)
     {
         $this->source = $source;
     }
@@ -88,7 +88,7 @@ final class JsonStream
      */
     public function readBlock(): string|null
     {
-        return $this->source?->readBlock(self::BLOCK_SIZE);
+        return $this->source?->readBlock($this->blockSize);
     }
 
     /**

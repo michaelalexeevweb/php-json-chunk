@@ -35,10 +35,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *        number, a broken escape — is handed here and skipped, instead of ending the read. A broken
      *        STRUCTURE still ends it: past an unbalanced bracket there is no telling where the next
      *        element starts. getValue() reads one value, not elements, and always throws.
+     * @param BlockSize $blockSize how many bytes the source is read in at a time — less memory, or room
+     *        for large elements to be read fast; see BlockSize. The default suits most documents.
      */
     public function __construct(
         private readonly bool $associative = true,
         callable|null $onInvalidItem = null,
+        private readonly BlockSize $blockSize = BlockSize::Kb64,
     ) {
         $this->onInvalidItem = $onInvalidItem === null ? null : $onInvalidItem(...);
     }
@@ -394,7 +397,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     {
         // A source was handed over ready to read: nothing to find, nothing to open.
         if ($filePath instanceof JsonSourceInterface) {
-            return new JsonStream($filePath);
+            return new JsonStream($filePath, $this->blockSize->value);
         }
 
         // A stream wrapper is not a missing file, and saying "was not found" about `php://memory`
@@ -423,7 +426,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         // The buffer travels with the source, so nothing about this read lives on the reader.
-        return new JsonStream(new FileSource($file, $filePath));
+        return new JsonStream(new FileSource($file, $filePath), $this->blockSize->value);
     }
 
     /**
@@ -1463,7 +1466,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // value is consumed once, and they never saw it, so a path plainly in the document was
             // reported missing. They walk the scanned copy instead of the stream.
             if ($active !== [] && ($firstChar === '{' || $firstChar === '[')) {
-                $copy = new JsonStream(new StringSource($raw, $filePath));
+                $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
                 try {
                     $copyFirst = $this->readNonWhitespaceChar($copy);
                     if ($copyFirst !== null) {
@@ -1760,7 +1763,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return $pairs;
         }
 
-        $copy = new JsonStream(new StringSource($raw, $filePath));
+        $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
         try {
             $copyFirst = $this->readNonWhitespaceChar($copy);
             if ($copyFirst !== null) {
@@ -1993,7 +1996,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 $wanted = $this->cursorsIntoChild($active, (string)$index);
                 if ($this->worthWalking($wanted, $valueFirst)) {
-                    $copy = new JsonStream(new StringSource($raw, $filePath));
+                    $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
                     try {
                         $copyFirst = $this->readNonWhitespaceChar($copy);
                         if ($copyFirst !== null) {
@@ -2493,7 +2496,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if (!$safe) {
-            $copy = new JsonStream(new StringSource($raw, $filePath));
+            $copy = new JsonStream(new StringSource($raw, $filePath), $this->blockSize->value);
             try {
                 $copyFirst = $this->readNonWhitespaceChar($copy);
                 if ($copyFirst !== null) {
@@ -2834,16 +2837,55 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $start = $stream->bufPos - 1;
-        if ($start < 0 || $stream->buf[$start] !== $valueFirst) {
+        if ($start < 0 || $stream->buf[$start] !== $valueFirst || $stream->fastMisses >= 8) {
             return false;
         }
 
+        if ($this->decodesFast($stream, $valueFirst, $start, $value, $associative, $raw, $maxDepth)) {
+            $stream->fastMisses = 0;
+
+            return true;
+        }
+
+        // A run of misses is a stretch the guess cannot settle — brackets inside strings, say, that
+        // never balance — and each would count to the end of the block: stop trying until the next.
+        $stream->fastMisses++;
+
+        return false;
+    }
+
+    /**
+     * The guess and the check behind decodeContainerFast().
+     */
+    private function decodesFast(
+        JsonStream $stream,
+        string $valueFirst,
+        int $start,
+        mixed &$value,
+        bool|null $associative,
+        string|null &$raw,
+        int $maxDepth,
+    ): bool {
         $close = $valueFirst === '{' ? '}' : ']';
         $at = $this->nextHit($stream, $close . ',');
 
-        for ($try = 0; $try < 4 && $at < $stream->bufLen; $try++) {
-            $length = $at + 1 - $start;
-            if (substr_count($stream->buf, $valueFirst, $start, $length) === substr_count($stream->buf, $close, $start, $length)) {
+        // Each `},` passed is counted up to, from the last one: an element full of nested objects has
+        // one at every object inside it, and the brackets balance only at its own end. Looking at a
+        // fixed few and giving up sent every such element to the scanner, three times slower.
+        $counted = $start;
+        $depth = 0;
+
+        while ($at < $stream->bufLen) {
+            $span = $at + 1 - $counted;
+            $depth += substr_count($stream->buf, $valueFirst, $counted, $span) - substr_count($stream->buf, $close, $counted, $span);
+            $counted = $at + 1;
+            if ($depth < 0) {
+                // More closed than opened: a bracket inside a string. No later `},` can balance it.
+                return false;
+            }
+
+            if ($depth === 0) {
+                $length = $at + 1 - $start;
                 $raw = substr($stream->buf, $start, $length);
                 try {
                     $value = json_decode($raw, $associative ?? $this->associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
@@ -2886,31 +2928,56 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $start = $stream->bufPos - 1;
-        if ($start < 0 || $stream->buf[$start] !== $valueFirst) {
+        if ($start < 0 || $stream->buf[$start] !== $valueFirst || $stream->fastMisses >= 8) {
             return null;
         }
 
+        $values = $this->decodesRun($stream, $valueFirst, $start);
+        if ($values !== null) {
+            $stream->fastMisses = 0;
+
+            return $values;
+        }
+
+        // Brackets inside strings, say, keep every cut unbalanced; each try counts over the whole run
+        // again. A run of misses stops the trying until the next block — the elements are read one at
+        // a time meanwhile, as they would be anyway.
+        $stream->fastMisses++;
+
+        return null;
+    }
+
+    /**
+     * The cut and the check behind decodeRunFast().
+     *
+     * @return array<int, mixed>|null
+     */
+    private function decodesRun(JsonStream $stream, string $valueFirst, int $start): array|null
+    {
         $close = $valueFirst === '{' ? '}' : ']';
-        $window = substr($stream->buf, $start, min($stream->bufLen, $start + self::RUN_BYTES) - $start);
-        $cut = strlen($window);
+        $end = min($stream->bufLen, $start + self::RUN_BYTES);
+        // With a negative offset strrpos() finds the last match STARTING at or before bufLen + offset,
+        // so the `}` must start two bytes before $end for its `,` to fall inside the run's window.
+        $searchFrom = $end - 2 - $stream->bufLen;
 
         for ($try = 0; $try < 8; $try++) {
-            $found = strrpos(substr($window, 0, $cut), $close . ',');
-            if ($found === false || $found === 0) {
+            // The last `},` that ends at or before $end, searched backwards in the buffer itself.
+            $found = $searchFrom < -$stream->bufLen ? false : strrpos($stream->buf, $close . ',', $searchFrom);
+            if ($found === false || $found <= $start) {
                 return null;
             }
 
-            $cut = $found;
-            $length = $cut + 1;
+            $length = $found + 1 - $start;
+            $searchFrom = $found - 1 - $stream->bufLen;
             if (
-                substr_count($window, '{', 0, $length) !== substr_count($window, '}', 0, $length)
-                || substr_count($window, '[', 0, $length) !== substr_count($window, ']', 0, $length)
+                substr_count($stream->buf, '{', $start, $length) !== substr_count($stream->buf, '}', $start, $length)
+                || substr_count($stream->buf, '[', $start, $length) !== substr_count($stream->buf, ']', $start, $length)
             ) {
                 continue;
             }
 
             try {
-                $values = json_decode('[' . substr($window, 0, $length) . ']', $this->associative, 512, JSON_THROW_ON_ERROR);
+                $values = json_decode('[' . substr($stream->buf, $start, $length) . ']', $this->associative, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
                 return null;
             }
