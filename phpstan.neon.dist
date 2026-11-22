@@ -5,6 +5,14 @@ parameters:
     level: 8
     paths:
         - src
+    ignoreErrors:
+        # The one call to json_validate() sits behind function_exists(): PHP 8.1 and 8.2 have no such
+        # function and skip the fast path. Analysed as 8.1 or 8.2 it is "not found"; as 8.3 or later
+        # it is fine — so the entry must not fail the run where it matches nothing.
+        -
+            message: '#^Function json_validate not found\.$#'
+            path: src/JsonChunkReader.php
+            reportUnmatched: false
     ergebnis:
         allRules: false
         declareStrictTypes:

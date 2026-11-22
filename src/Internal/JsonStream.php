@@ -68,6 +68,13 @@ final class JsonStream
      */
     public array $nextHit = [];
 
+    /**
+     * Fast skips that did not come off since the last one that did, in this block. A run of them is
+     * the sign of a stretch the guess cannot settle — a deep nest, say, where every level would count
+     * brackets over the same long span again — and the skip stops trying until the next block.
+     */
+    public int $fastMisses = 0;
+
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
 
@@ -94,6 +101,7 @@ final class JsonStream
     {
         $this->bytesBeforeBuffer += $this->bufLen;
         $this->nextHit = [];
+        $this->fastMisses = 0;
         $this->buf = $chunk;
         $this->bufLen = strlen($chunk);
         $this->bufPos = $startPos;
@@ -122,6 +130,7 @@ final class JsonStream
 
         $offset = $this->offset();
         $this->nextHit = [];
+        $this->fastMisses = 0;
         $this->buf = implode('', array_reverse($this->charBuffer)) . substr($this->buf, $this->bufPos);
         $this->bufLen = strlen($this->buf);
         $this->bufPos = 0;

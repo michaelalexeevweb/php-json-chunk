@@ -3,6 +3,30 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.9.0 — 2026-11-22
+
+### Fixed
+
+- **`*.*` over objects with a repeated name gave a different answer depending on where the element sat.** The decoded walk added in 1.8.0 guarded against a repeated name only through the names in the path, and `*.*` has none after the wildcard: `[{"a":1,"a":2},{}]` gave `[2]`, while the same element last in its list gave `[1, 2]`, which is what a wildcard over an object is documented to give. An element is now decoded and walked only when json_decode() kept every member: the members in its bytes — the colons left once the strings are cut out, by one PCRE pass — are counted against the members decoded.
+
+### Faster
+
+- **`**` and `readPaths()` follow small elements decoded**, as 1.8.0 began doing for one wildcard path: an element that ends within the block in hand is decoded in C and the cursors walk the decoded value, with the same guards — a repeated name, an escape, the depth `**` walks to — sending an element back to the stream walk where the two could differ.
+- **Skipping a branch on the way to the path is done in C on PHP 8.3 and later.** The same guess at where a container ends is settled by `json_validate()`, which checks it without building a value; where it does not validate — or on PHP 8.1 and 8.2, which have no `json_validate()` — the skip walks it as before, and refuses a broken one with the same message. Each element of a long skipped list gets the chance, so a list too big for one block is skipped at the speed of its elements; a run of misses — a deep nest, say — turns the attempt off until the next block, so it never costs more than it saves.
+
+| 200 000 records (20 MB) | 1.8.0 | now |
+|---|---:|---:|
+| `getValue()` of a value after a 20 MB list | 1.80 s | 0.38 s |
+| `**.email` | 4.3 s | 2.2 s |
+| `**.zzz`, a name that is not there | 2.7 s | 1.3 s |
+| `readPaths()`, `users.*.email` and `users.*.id` | 3.8 s | 1.6 s |
+
+Memory stays at 0.14–0.19 MB peak on each of these.
+
+### Not done, measured
+
+- **Handing elements over as raw JSON** would save almost nothing: `json_validate()` takes 95 ms where `json_decode()` takes 108 ms over the same 200 000 elements, so a raw read that still checks its elements is 3% faster, and one that does not would let a broken element through.
+
 ## 1.8.0 — 2026-11-22
 
 ### Faster

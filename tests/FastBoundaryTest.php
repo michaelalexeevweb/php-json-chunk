@@ -75,6 +75,39 @@ final class FastBoundaryTest extends TestCase
     }
 
     /**
+     * A branch on the way to the path is skipped by the same guess, checked by json_validate() where
+     * PHP has it. The old skip never looked inside strings or numbers, so a branch json_validate()
+     * refuses must still be skipped the old way — not refused — and one with a broken structure must
+     * be refused with the old message.
+     *
+     * @return iterable<string, array{0: string, 1: array<int, mixed>|string}>
+     */
+    public static function skippedBranches(): iterable
+    {
+        yield 'a number the skip never checked' => ['{"a":[{"x":01},{"y":1},{"z":"},{"}],"t":[1]}', [1]];
+        yield 'an escape the skip never checked' => ['{"a":[{"x":"\u00zz"},{"y":1}],"t":[1]}', [1]];
+        yield 'brackets that do not match' => ['{"a":[{"x":1]],"t":[1]}', 'expected "," or "}" in object.'];
+        yield 'a branch that never ends' => ['{"a":[{"x":1},{"y":2}', 'expected "," or "]" in array.'];
+        yield 'branches after the path' => ['{"a":[{"x":1},{"y":2}],"t":[1] , "u":{"q":[1,2],"r":{}}}', [1]];
+    }
+
+    /**
+     * @param array<int, mixed>|string $expected the values, or the message the read is refused with
+     */
+    #[DataProvider('skippedBranches')]
+    public function testASkippedBranchIsSkippedAsBefore(string $document, array|string $expected): void
+    {
+        if (is_string($expected)) {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage($expected);
+        }
+
+        $values = iterator_to_array((new JsonChunkReader())->readGenerator(new StringSource($document), keyPath: 't'));
+
+        self::assertSame($expected, $values);
+    }
+
+    /**
      * @return iterable<string, array{0: string, 1: string}>
      */
     public static function brokenDocuments(): iterable

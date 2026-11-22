@@ -1670,6 +1670,188 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * A container these cursors go into, read fast when it ends within the block in hand: decoded
+     * whole in C, then walked in the decoded value by followCursorsDecoded() — the `[label, value]`
+     * pairs walkCursors() would have yielded, in its order. Null, with the stream untouched, when it
+     * cannot be read that way; walkCursors() then reads it from the stream.
+     *
+     * The decoded walk and the stream walk part in one place, a repeated name — the stream walks each
+     * occurrence, json_decode() keeps the last — so an element whose bytes show one the paths could
+     * meet is walked the stream way, from its bytes. And a document deeper than `**` walks is refused
+     * the same way: json_decode() is given only the depth left, so an element that goes deeper is
+     * left to the stream walk, which refuses it.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param array<string, bool> $matched
+     *
+     * @return array<int, array{0: string, 1: mixed}>|null
+     *
+     * @throws InvalidArgumentException
+     */
+    private function followCursorsFast(
+        JsonStream $stream,
+        string $valueFirst,
+        array $cursors,
+        string $filePath,
+        array &$matched,
+        int $level,
+    ): array|null {
+        $maxDepth = min(512, self::MAX_RECURSIVE_DEPTH + 2 - $level);
+        if ($maxDepth < 2) {
+            return null;
+        }
+
+        $needles = [];
+        $wildcard = false;
+        foreach ($cursors as $cursor) {
+            for ($index = $cursor['depth'], $count = count($cursor['segments']); $index < $count; $index++) {
+                $segment = $cursor['segments'][$index];
+                if ($segment === '*' || $segment === '**') {
+                    $wildcard = true;
+
+                    continue;
+                }
+
+                if (str_contains($segment, '/') || preg_match('/["\\\\\x00-\x1f]/', $segment) === 1) {
+                    return null;
+                }
+
+                $needles['"' . $segment . '"'] = true;
+            }
+        }
+
+        if (!$this->decodeContainerFast($stream, $valueFirst, $element, false, $raw, $maxDepth)) {
+            return null;
+        }
+
+        $raw = (string)$raw;
+        $safe = $needles === [] || !str_contains($raw, '\\u');
+        foreach ($needles as $needle => $ignored) {
+            if (!$safe || substr_count($raw, (string)$needle) > 1) {
+                $safe = false;
+
+                break;
+            }
+        }
+
+        if ($safe && $wildcard) {
+            $safe = $this->repeatsNoName($raw, $element);
+        }
+
+        $pairs = [];
+        if ($safe) {
+            $this->followCursorsDecoded($element, $cursors, $matched, $pairs);
+
+            return $pairs;
+        }
+
+        $copy = new JsonStream(new StringSource($raw, $filePath));
+        try {
+            $copyFirst = $this->readNonWhitespaceChar($copy);
+            if ($copyFirst !== null) {
+                foreach ($this->walkCursors($copy, $copyFirst, $cursors, $filePath, $matched, $level) as $label => $value) {
+                    $pairs[] = [(string)$label, $value];
+                }
+            }
+        } finally {
+            $copy->close();
+        }
+
+        return $pairs;
+    }
+
+    /**
+     * walkCursors(), over a value already decoded with objects as stdClass: the same cursors, the same
+     * matches, in the same order, collected as `[label, value]` pairs.
+     *
+     * @param array<int, array{segments: array<int, string>, depth: int, label: string, id: int, needle: string|null}> $cursors
+     * @param array<string, bool> $matched
+     * @param array<int, array{0: string, 1: mixed}> $pairs
+     */
+    private function followCursorsDecoded(mixed $node, array $cursors, array &$matched, array &$pairs): void
+    {
+        $cursors = $this->expandRecursiveCursors($cursors);
+        $arrived = [];
+        $active = [];
+        foreach ($cursors as $cursor) {
+            if ($cursor['depth'] >= count($cursor['segments'])) {
+                $arrived[] = $cursor;
+            } else {
+                $active[] = $cursor;
+            }
+        }
+
+        $isList = is_array($node);
+        $isContainer = $isList || $node instanceof stdClass;
+
+        if ($arrived !== []) {
+            foreach ($arrived as $cursor) {
+                $matched[$cursor['label']] = true;
+            }
+
+            if ($isList && $active !== [] && $this->allWalkLeafLists($arrived)) {
+                foreach ($node as $index => $element) {
+                    $value = $this->asConfigured($element);
+                    foreach ($arrived as $cursor) {
+                        $pairs[] = [$cursor['label'], $value];
+                    }
+
+                    $wanted = $this->cursorsIntoChild($active, (string)$index);
+                    if ($wanted !== []) {
+                        $this->followCursorsDecoded($element, $wanted, $matched, $pairs);
+                    }
+                }
+
+                return;
+            }
+
+            $value = $this->asConfigured($node);
+            foreach ($arrived as $cursor) {
+                if ($isList && $this->walksLeafList($cursor['segments'])) {
+                    foreach ($value as $item) {
+                        $pairs[] = [$cursor['label'], $item];
+                    }
+
+                    continue;
+                }
+
+                $pairs[] = [$cursor['label'], $value];
+            }
+
+            if ($active !== [] && $isContainer) {
+                $this->followCursorsDecoded($node, $active, $matched, $pairs);
+            }
+
+            return;
+        }
+
+        if (!$isContainer) {
+            return;
+        }
+
+        foreach ($isList ? $node : get_object_vars($node) as $key => $child) {
+            if (is_array($child) || $child instanceof stdClass) {
+                $wanted = $this->cursorsIntoChild($cursors, (string)$key);
+                if ($wanted !== []) {
+                    $this->followCursorsDecoded($child, $wanted, $matched, $pairs);
+                }
+
+                continue;
+            }
+
+            // A scalar holds nothing: the one question is which paths end on it — those whose
+            // segment here is `*` or its name, and is their last.
+            foreach ($cursors as $cursor) {
+                $segment = $cursor['segments'][$cursor['depth']];
+                if ($cursor['depth'] + 1 === count($cursor['segments']) && ($segment === '*' || $segment === (string)$key)) {
+                    $matched[$cursor['label']] = true;
+                    $pairs[] = [$cursor['label'], $child];
+                }
+            }
+        }
+    }
+
+    /**
      * A scalar child: decoded once and paired with each path that ends on it, or skipped when none
      * does. Not a generator — a scalar is too small a thing to set one up for.
      *
@@ -1899,6 +2081,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             } elseif ($valueFirst === '{' || $valueFirst === '[') {
                 if ($this->holdsNoTarget($stream, $wanted)) {
                     $this->skipValue($stream, $valueFirst, $filePath);
+                } elseif (($pairs = $this->followCursorsFast($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1)) !== null) {
+                    foreach ($pairs as [$label, $value]) {
+                        yield $label => $value;
+                    }
                 } else {
                     yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1);
                 }
@@ -1967,6 +2153,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             } elseif ($valueFirst === '{' || $valueFirst === '[') {
                 if ($this->holdsNoTarget($stream, $wanted)) {
                     $this->skipValue($stream, $valueFirst, $filePath);
+                } elseif (($pairs = $this->followCursorsFast($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1)) !== null) {
+                    foreach ($pairs as [$label, $value]) {
+                        yield $label => $value;
+                    }
                 } else {
                     yield from $this->walkCursors($stream, $valueFirst, $wanted, $filePath, $matched, $level + 1);
                 }
@@ -2281,6 +2471,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
         }
 
+        // A wildcard ahead hands over every member of an object it meets, a repeated one each time,
+        // and no name in the path shows where one repeats — so the element as a whole must have none.
+        if ($safe && in_array('*', array_slice($segments, $depth), true)) {
+            $safe = $this->repeatsNoName($raw, $element);
+        }
+
         if (!$safe) {
             $copy = new JsonStream(new StringSource($raw, $filePath));
             try {
@@ -2300,6 +2496,44 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         foreach ($found as $value) {
             yield $value;
         }
+    }
+
+    /**
+     * Whether json_decode() kept every member of $raw — no object in it names one twice, however the
+     * name is spelled. The members in the bytes are counted as the colons left once every string is cut
+     * out, by one PCRE pass in C; the members kept are counted in the decoded value. A repeated name is
+     * the one way for the two to differ.
+     */
+    private function repeatsNoName(string $raw, mixed $decoded): bool
+    {
+        $stripped = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '', $raw);
+        if (!is_string($stripped)) {
+            return false;
+        }
+
+        return substr_count($stripped, ':') === $this->memberCount($decoded);
+    }
+
+    /**
+     * Every member of every object in a value decoded with objects as stdClass.
+     */
+    private function memberCount(mixed $value): int
+    {
+        $count = 0;
+        if ($value instanceof stdClass) {
+            $value = get_object_vars($value);
+            $count = count($value);
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $child) {
+                if (is_array($child) || $child instanceof stdClass) {
+                    $count += $this->memberCount($child);
+                }
+            }
+        }
+
+        return $count;
     }
 
     /**
@@ -2578,6 +2812,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         mixed &$value,
         bool|null $associative = null,
         string|null &$raw = null,
+        int $maxDepth = 512,
     ): bool {
         if (($valueFirst !== '{' && $valueFirst !== '[') || $stream->charBuffer !== []) {
             return false;
@@ -2596,8 +2831,64 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             if (substr_count($stream->buf, $valueFirst, $start, $length) === substr_count($stream->buf, $close, $start, $length)) {
                 $raw = substr($stream->buf, $start, $length);
                 try {
-                    $value = json_decode($raw, $associative ?? $this->associative, 512, JSON_THROW_ON_ERROR);
+                    $value = json_decode($raw, $associative ?? $this->associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
                 } catch (JsonException) {
+                    return false;
+                }
+
+                $stream->bufPos = $at + 1;
+
+                return true;
+            }
+
+            $found = strpos($stream->buf, $close . ',', $at + 1);
+            $at = $found === false ? $stream->bufLen : $found;
+        }
+
+        return false;
+    }
+
+    /**
+     * A container the stream has just entered, skipped without the PHP scanner when the block in hand
+     * makes that possible — decodeContainerFast() with json_validate() in place of json_decode(): the
+     * same guess at the end, settled without building a value. False, with the stream untouched, when
+     * it cannot be: before PHP 8.3, which has no json_validate(), or when the guess does not validate
+     * — then the scanner skips it, and refuses it if it is broken, as ever.
+     */
+    private function skipContainerFast(JsonStream $stream, string $firstChar): bool
+    {
+        if (($firstChar !== '{' && $firstChar !== '[') || $stream->charBuffer !== [] || $stream->fastMisses >= 8 || !function_exists('json_validate')) {
+            return false;
+        }
+
+        if ($this->skipsFast($stream, $firstChar)) {
+            $stream->fastMisses = 0;
+
+            return true;
+        }
+
+        $stream->fastMisses++;
+
+        return false;
+    }
+
+    /**
+     * The guess and the check behind skipContainerFast().
+     */
+    private function skipsFast(JsonStream $stream, string $firstChar): bool
+    {
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== $firstChar) {
+            return false;
+        }
+
+        $close = $firstChar === '{' ? '}' : ']';
+        $at = $this->nextHit($stream, $close . ',');
+
+        for ($try = 0; $try < 4 && $at < $stream->bufLen; $try++) {
+            $length = $at + 1 - $start;
+            if (substr_count($stream->buf, $firstChar, $start, $length) === substr_count($stream->buf, $close, $start, $length)) {
+                if (!json_validate(substr($stream->buf, $start, $length))) {
                     return false;
                 }
 
@@ -2743,20 +3034,25 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         while (true) {
             if ($char === '{' || $char === '[') {
-                $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
-                $next = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
-                if ($next === null) {
-                    throw new InvalidArgumentException($this->invalidJsonMessage(
-                        $filePath,
-                        $char === '{' ? 'unexpected end of input in object.' : 'unexpected end of input in array.',
-                    ));
-                }
+                // A container that ends within the block is skipped whole, in C, when it validates;
+                // only one that does not is walked here. Each element of a long skipped list gets the
+                // chance, so a list too big for one block still goes at the speed of its elements.
+                if (!$this->skipContainerFast($stream, $char)) {
+                    $stream->bufPos += strspn($stream->buf, " \t\n\r", $stream->bufPos);
+                    $next = $stream->bufPos < $stream->bufLen ? $stream->buf[$stream->bufPos++] : $this->readNonWhitespaceChar($stream);
+                    if ($next === null) {
+                        throw new InvalidArgumentException($this->invalidJsonMessage(
+                            $filePath,
+                            $char === '{' ? 'unexpected end of input in object.' : 'unexpected end of input in array.',
+                        ));
+                    }
 
-                if ($next !== ($char === '{' ? '}' : ']')) {
-                    $open[] = $char;
-                    $char = $char === '{' ? $this->skipObjectKey($stream, $next, $filePath) : $next;
+                    if ($next !== ($char === '{' ? '}' : ']')) {
+                        $open[] = $char;
+                        $char = $char === '{' ? $this->skipObjectKey($stream, $next, $filePath) : $next;
 
-                    continue;
+                        continue;
+                    }
                 }
             } elseif ($char === '"') {
                 // A string with no escape that ends inside this block — nearly all of them — is one

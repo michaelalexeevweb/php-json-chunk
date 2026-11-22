@@ -37,6 +37,12 @@ final class DecodedWalkTest extends TestCase
         yield 'a scalar where the path goes on' => ['[{"e":1},{"e":{"x":2}},{}]', '*.e.x', [2]];
         yield 'the name as a value' => ['[{"k":"e","e":1},{}]', '*.e', [1]];
         yield 'a huge number' => ['[{"n":1e999},{"n":12345678901234567890},{}]', '*.n', [INF, 1.2345678901234567E+19]];
+        // A wildcard over an object hands over every member, a repeated one each time — names in the
+        // path do not show it, as there are none after the `*`.
+        yield 'a repeated name under a wildcard' => ['[{"a":1,"a":2},{}]', '*.*', [1, 2]];
+        yield 'a repeated name further down a wildcard' => ['[{"m":{"x":{"v":1},"x":{"v":2}}},{}]', '*.m.*.v', [1, 2]];
+        yield 'a repeated name spelled with an escape under a wildcard' => ['[{"m":{"\u0061":1,"a":2}},{}]', '*.m.*', [1, 2]];
+        yield 'a colon inside strings does not count as a member' => ['[{"a":"x:y","b":"\\":"},{}]', '*.*', ['x:y', '":']];
         yield 'over an object' => ['{"u1":{"e":"a","x":{"y":1}},"u2":{"e":"b"},"z":{}}', '*.x', [['y' => 1]]];
     }
 
