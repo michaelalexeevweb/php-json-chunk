@@ -3,6 +3,26 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.10.0 — 2026-11-22
+
+### Faster
+
+**Reading a list is about four times faster, at a few hundredths of a megabyte more.** Per element, the PHP around `json_decode()` — finding the element, its delimiter, the calls between — cost four times the decode itself. Now a list's elements are decoded a run at a time: from one element to the last `},` within 4 KB, by one `json_decode()` of the run in brackets, and the PHP work is paid once per run.
+
+A run that decodes is the document's own elements: a cut inside a string leaves an odd number of quotes and never decodes, so a run that does ends between elements. A cut inside an element leaves its brackets unbalanced, which is checked first and moves the cut back. A balanced run that still does not decode holds a broken element, and is read one element at a time — so the element is refused at its own byte, or handed to `onInvalidItem` with its own index, exactly as before.
+
+| records | 1.9.0 | 1.10.0 | peak memory |
+|---|---:|---:|---:|
+| 100 000 | 197 ms | 52 ms | 0.15 → 0.16 MB |
+| 1 000 000 | 2.00 s | 0.51 s | 0.15 → 0.16 MB |
+| 200 000 larger records (20 MB) | 431 ms | 145 ms | 0.17 → 0.20 MB |
+
+The run is 4 KB because that is where the speed stops coming: 16 KB and 64 KB were 2% to 6% faster still, at 0.40 MB and 1.20 MB.
+
+### Documentation
+
+- **BENCHMARKS.md and the README are measured again**, all six readers from ten thousand records to five million. This library is now 15 to 21 times faster than JsonMachine at every size, 1.2× to 1.8× behind `json_decode()` up to a million records, and ahead of it at five million — 2.7 s against 3.0 s, at 0.16 MB against 3.5 GB. Two figures in BENCHMARKS.md were also wrong for the dataset the script now writes: a record has four fields, not five, and `json_decode()` needs about 9× the file, not 7×.
+
 ## 1.9.0 — 2026-11-22
 
 ### Fixed
