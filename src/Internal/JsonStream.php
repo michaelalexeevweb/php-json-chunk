@@ -96,6 +96,17 @@ final class JsonStream
      */
     public array $noRunBefore = [];
 
+    /**
+     * The entries a read from an index answers for, from the first it yields up to, not including,
+     * $handOverTo: only an invalid entry among them is handed to onInvalidItem. A read seeks to a
+     * checkpoint before its first entry and reads on one entry past its last, and the entries it passes
+     * on the way belong to another read — in parallel, another worker's, which hands them over itself.
+     * Counted as the read counts its entries: by the entries yielded before, or the document's number.
+     */
+    public int $handOverFrom = 0;
+
+    public int|null $handOverTo = null;
+
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
 

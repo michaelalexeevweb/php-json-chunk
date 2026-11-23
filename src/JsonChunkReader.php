@@ -694,7 +694,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 try {
                     $value = json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
-                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
+                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath, $this->beyondHandOver($stream, $produced));
                     $value = null;
                     $key = null;
                 }
@@ -859,7 +859,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 try {
                     $value = json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
-                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
+                    $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath, $this->beyondHandOver($stream, $produced));
                     $refused = true;
                 }
 
@@ -3902,6 +3902,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int $valueOffset,
         int|string|null $key,
         string $filePath,
+        bool $beyond = false,
     ): void {
         if ($this->onInvalidItem === null) {
             throw new InvalidArgumentException(
@@ -3911,7 +3912,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             );
         }
 
+        // Passed on the way to the entries asked for, or just past them: another read's to hand over.
+        if ($beyond) {
+            return;
+        }
+
         ($this->onInvalidItem)(new InvalidItem($rawValue, $exception->getMessage(), $valueOffset, $key));
+    }
+
+    /**
+     * Whether an invalid entry at $position lies outside what the read answers for — see
+     * JsonStream::$handOverFrom.
+     */
+    private function beyondHandOver(JsonStream $stream, int $position): bool
+    {
+        return $position < $stream->handOverFrom || ($stream->handOverTo !== null && $position >= $stream->handOverTo);
     }
 
     /**
@@ -4653,7 +4668,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 try {
                     $document = json_decode($raw, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
-                    $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $sourceName);
+                    $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $sourceName, $this->beyondHandOver($stream, $index));
                     $index++;
 
                     continue;
@@ -4911,6 +4926,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new InvalidArgumentException('every must be at least 1.');
         }
 
+        // Kept whole, for a process in another directory to find: a saved index is meant to be used
+        // elsewhere. A path realpath() cannot settle — a stream wrapper's — is kept as given.
+        $filePath = realpath($filePath) ?: $filePath;
         clearstatcache(true, $filePath);
         $size = (int)filesize($filePath);
         $modified = (int)filemtime($filePath);
@@ -4948,6 +4966,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new InvalidArgumentException('every must be at least 1.');
         }
 
+        $filePath = realpath($filePath) ?: $filePath;
         clearstatcache(true, $filePath);
         $size = (int)filesize($filePath);
         $modified = (int)filemtime($filePath);
@@ -5011,6 +5030,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             $stream->pushBack($first);
+            $stream->handOverFrom = $offset;
+            $stream->handOverTo = $limit === null ? null : $offset + $limit;
 
             if ($index->container === JsonIndex::VALUES) {
                 // Documents are numbered as readValues() numbers them, refused ones too, so the window
@@ -5159,6 +5180,25 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 while (ob_get_level() > 0) {
                     ob_end_clean();
                 }
+
+                // A fatal error — out of memory — ends the worker without a word to the caller. The
+                // caller's shutdown functions run first, as PHP runs them in order; then this one sends
+                // the error. On the way out of a worker that finished, it never runs.
+                // Out of memory, PHP 8.1 has none left for the shutdown function to word the error in:
+                // a reserve, freed first, and the limit lifted for a process about to end anyway.
+                $writer = $channel[1];
+                $reserve = str_repeat("\0", 65536);
+                register_shutdown_function(static function () use ($writer, &$reserve): void {
+                    $reserve = null;
+                    $error = error_get_last();
+                    if ($error !== null && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_PARSE], true) && is_resource($writer)) {
+                        ini_set('memory_limit', '-1');
+                        fwrite($writer, sprintf('PHP Fatal error: %s in %s:%d', $error['message'], $error['file'], $error['line']));
+                        fclose($writer);
+                        self::endWorker(1);
+                    }
+                });
+
                 $status = 0;
                 try {
                     $result = $work($this->readFrom($index, $partition->offset, $partition->limit), $partition);
@@ -5231,23 +5271,44 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // Read to the end before waiting: a worker with a long result is still writing it.
             $message = (string)stream_get_contents($channel);
             fclose($channel);
-            pcntl_waitpid($pid, $status);
+            // Waited for again when a signal of the caller's cuts the wait short, or the worker is
+            // left a zombie.
+            do {
+                $waited = pcntl_waitpid($pid, $status);
+            } while ($waited === -1 && pcntl_get_last_error() === PCNTL_EINTR);
             // A worker that finished says so, and then ends by SIGKILL — or by exit(0), without posix.
             $ended = pcntl_wifexited($status)
                 ? pcntl_wexitstatus($status) === 0
                 : pcntl_wifsignaled($status) && pcntl_wtermsig($status) === SIGKILL;
             $finished = $ended && str_starts_with($message, self::WORKER_DONE);
             if (!$finished) {
-                $failures[] = sprintf('worker %d: %s', $part, $message !== '' && !str_starts_with($message, self::WORKER_DONE) ? $message : 'ended without finishing');
+                // How it ended, when it said nothing: a crash of PHP itself shows as a signal.
+                $how = pcntl_wifsignaled($status)
+                    ? sprintf(' (killed by signal %d)', pcntl_wtermsig($status))
+                    : (pcntl_wifexited($status) ? sprintf(' (exit status %d)', pcntl_wexitstatus($status)) : '');
+                $failures[] = sprintf('worker %d: %s', $part, $message !== '' && !str_starts_with($message, self::WORKER_DONE) ? $message : 'ended without finishing' . $how);
 
                 continue;
             }
 
             if ($send) {
                 $payload = substr($message, strlen(self::WORKER_DONE));
-                $result = unserialize($payload);
-                if ($result === false && $payload !== serialize(false)) {
-                    $failures[] = sprintf('worker %d: its result could not be read back', $part);
+                // Neither a notice — which a framework's error handler turns into an exception — nor an
+                // exception from the class read back may leave the wait: the workers after this one
+                // would never be waited for.
+                set_error_handler(static fn(): bool => true);
+                try {
+                    $result = unserialize($payload);
+                    $unreadable = $result === false && $payload !== serialize(false) ? '' : null;
+                } catch (Throwable $exception) {
+                    $result = null;
+                    $unreadable = ' — ' . $exception::class . ': ' . $exception->getMessage();
+                } finally {
+                    restore_error_handler();
+                }
+
+                if ($unreadable !== null) {
+                    $failures[] = sprintf('worker %d: its result could not be read back%s', $part, $unreadable);
 
                     continue;
                 }

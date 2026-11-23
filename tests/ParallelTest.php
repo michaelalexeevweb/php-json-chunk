@@ -18,6 +18,9 @@ final class ParallelTest extends TestCase
 {
     private string $directory;
 
+    /** What the last runScript() process printed, for a failure to show. */
+    private string $printed = '';
+
     protected function setUp(): void
     {
         $this->directory = sys_get_temp_dir() . '/parallel_' . uniqid('', true);
@@ -215,7 +218,8 @@ echo json_encode(["error" => $error, "ids" => $ids, "workers" => count($pids), "
 
     /**
      * readInParallel() forks too: $body runs in a PHP process of its own with $reader and $index over
-     * $path, and sets $answer, which comes back JSON-encoded.
+     * $path, and sets $answer, which comes back JSON-encoded — through a file, so that whatever the
+     * process prints, a fatal error's message among it, cannot get in the way.
      *
      * @return array<string, mixed>
      */
@@ -235,11 +239,12 @@ try {
 } catch (Throwable $exception) {
     $answer = ["error" => get_class($exception) . ": " . $exception->getMessage()];
 }
-echo json_encode($answer);
+file_put_contents(' . var_export($this->directory . '/answer.json', true) . ', json_encode($answer));
 ');
 
         $output = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' 2>&1');
-        $answer = json_decode($output, true);
+        $this->printed = $output;
+        $answer = json_decode((string)@file_get_contents($this->directory . '/answer.json'), true);
         self::assertIsArray($answer, $output);
 
         return $answer;
@@ -427,6 +432,97 @@ echo json_encode($answer);
         self::assertSame([334, 333, 333], $answer['parts']);
         self::assertSame('buffered by the caller', $answer['buffered']);
         self::assertSame('', $answer['log'], 'a worker ran the caller\'s destructor or shutdown function');
+    }
+
+    /**
+     * A worker that dies of a fatal error — out of memory — said only that it ended without finishing;
+     * why went to its standard error. It now sends the error, so the caller's exception says it.
+     */
+    public function testAWorkersFatalErrorReachesTheCaller(): void
+    {
+        // The PHP 8.1 of the CI's runners ends a worker that ran out of memory with status 1 and runs
+        // no shutdown function at all, the test's own included; PHP 8.1 built from the official image
+        // runs them. Without one there is nothing to send the error with.
+        if (PHP_VERSION_ID < 80200) {
+            self::markTestSkipped('Some builds of PHP 8.1 run no shutdown function after running out of memory.');
+        }
+
+        $answer = $this->runScript($this->listFile(1000), '
+            // The fatal error is printed too, which is not what is tested here.
+            ini_set("display_errors", "0");
+            ini_set("log_errors", "0");
+            $results = $reader->readInParallel($index, 2, function (Generator $users, PhpJsonChunk\Partition $part): int {
+                iterator_to_array($users);
+                if ($part->number === 1) {
+                    ini_set("memory_limit", "16M");
+                    $grow = [];
+                    while (true) {
+                        $grow[] = str_repeat("x", 100_000);
+                    }
+                }
+
+                return 1;
+            });
+            $answer = ["results" => $results];
+        ');
+
+        self::assertIsString($answer['error'] ?? null);
+        self::assertStringContainsString('worker 1: PHP Fatal error: Allowed memory size', $answer['error'], 'The process printed: ' . $this->printed);
+        self::assertStringNotContainsString('worker 0', $answer['error']);
+    }
+
+    /**
+     * A result whose class refuses to be read back threw out of the wait for the workers: the ones
+     * not yet waited for were left unreaped, and the message did not say which worker. It is now that
+     * worker's failure, like a result that cannot be sent.
+     */
+    public function testAResultThatCannotBeReadBackIsThatWorkersFailure(): void
+    {
+        $answer = $this->runScript($this->listFile(100), '
+            final class Stubborn
+            {
+                public function __serialize(): array
+                {
+                    return ["x" => 1];
+                }
+
+                public function __unserialize(array $data): void
+                {
+                    throw new DomainException("not here");
+                }
+            }
+
+            $results = $reader->readInParallel($index, 3, fn(Generator $users, PhpJsonChunk\Partition $part): mixed => $part->number === 1 ? new Stubborn() : $part->number);
+            $answer = ["results" => $results];
+        ');
+
+        self::assertIsString($answer['error'] ?? null);
+        self::assertStringContainsString('worker 1: its result could not be read back — DomainException: not here', $answer['error']);
+    }
+
+    /**
+     * onInvalidItem runs where the entry is read — in a worker — so what it collects stays there; the
+     * README's way to bring it back is to return it with the part's result.
+     */
+    public function testRefusedEntriesComeBackWithTheResult(): void
+    {
+        $lines = $this->directory . '/refused.ndjson';
+        file_put_contents($lines, implode("\n", array_map(static fn(int $i): string => $i % 100 === 7 ? '{"id":0' . $i . '}' : '{"id":' . $i . '}', range(0, 999))) . "\n");
+
+        $answer = $this->runScript($this->listFile(1), '
+            $refused = [];
+            $reader = new PhpJsonChunk\JsonChunkReader(onInvalidItem: function (PhpJsonChunk\InvalidItem $item) use (&$refused): void {
+                $refused[] = $item->key;
+            });
+            $index = $reader->indexValues(' . var_export($lines, true) . ');
+            $refused = [];
+            $parts = $reader->readInParallel($index, 4, function (Generator $lines) use (&$refused): array {
+                return ["read" => iterator_count($lines), "refused" => $refused];
+            });
+            $answer = ["read" => array_sum(array_column($parts, "read")), "refused" => array_merge(...array_column($parts, "refused")), "inTheCaller" => $refused];
+        ');
+
+        self::assertSame(['read' => 990, 'refused' => range(7, 907, 100), 'inTheCaller' => []], $answer);
     }
 
     public function testAResultThatCannotBeSentFailsTheRead(): void

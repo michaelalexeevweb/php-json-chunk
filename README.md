@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.1.1
+composer require michaelalexeevweb/php-json-chunk:^2.1.2
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -608,7 +608,35 @@ by every worker. A worker ends without running anything of the caller's it was c
 destructors, no shutdown functions, no output buffers — so a connection the caller opened before the read
 is not closed by the workers' copies of it, and output the caller had buffered is not printed again. It
 ends itself with SIGKILL once it has sent what it has to, which needs PHP's posix extension; without it,
-a worker ends with `exit()`.
+a worker ends with `exit()`. A worker that dies of a fatal error — out of memory — sends the error, and
+the exception says it: `worker 1: PHP Fatal error: Allowed memory size … exhausted`. PHP runs the
+caller's shutdown functions on any fatal error, in a worker too, and nothing can stop it. Some builds of
+PHP 8.1 run no shutdown function after running out of memory; there the exception says how the worker
+ended — `worker 1: ended without finishing (exit status 1)`, or `(killed by signal 11)` for a crash.
+
+`onInvalidItem` runs where an entry is read — in a worker — so what it collects stays in that worker.
+Each read hands over only the invalid entries of its own part; bring them back with the result:
+
+```php
+// Recipe: needs pcntl (PHP's command line on Linux or macOS) — checked for syntax by the tests, not run.
+$refused = [];
+$reader = new JsonChunkReader(onInvalidItem: function (InvalidItem $item) use (&$refused): void {
+    $refused[] = $item->key;
+});
+$index = $reader->indexValues('/data/events.ndjson');
+$refused = [];   // the ones indexing met, if they are not wanted twice
+
+$parts = $reader->readInParallel($index, 6, function (Generator $events) use (&$refused): array {
+    $read = 0;
+    foreach ($events as $event) {
+        $read++;
+    }
+
+    return ['read' => $read, 'refused' => $refused];   // this worker's copy
+});
+
+$refusedEverywhere = array_merge(...array_column($parts, 'refused'));
+```
 
 To put the parts back together — a total, a count, the ids that failed a check — `readInParallel()`
 hands each worker its whole part as a generator, with the `Partition` it is reading, and gives back what

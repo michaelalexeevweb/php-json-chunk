@@ -34,6 +34,32 @@ final class JsonIndex
         public readonly int $size,
         public readonly int $modified,
     ) {
+        // Looked up by binary search, which takes them to ascend; one out of place would land a read at
+        // another entry's start and number every entry after it wrongly, without a word.
+        if ($count < 0) {
+            throw new InvalidArgumentException('Not an index: the count is negative.');
+        }
+
+        if ($count > 0 && ($checkpoints[0][0] ?? null) !== 0) {
+            throw new InvalidArgumentException('Not an index: there is no checkpoint for the first entry.');
+        }
+
+        $previous = null;
+        foreach ($checkpoints as [$entry, $byte]) {
+            if ($byte < 0) {
+                throw new InvalidArgumentException(sprintf('Not an index: checkpoint %d is at a negative byte.', $entry));
+            }
+
+            if ($entry >= $count) {
+                throw new InvalidArgumentException(sprintf('Not an index: checkpoint %d is past the %d entries.', $entry, $count));
+            }
+
+            if ($previous !== null && ($entry <= $previous[0] || $byte <= $previous[1])) {
+                throw new InvalidArgumentException(sprintf('Not an index: checkpoints must be ascending, and %d at byte %d comes after %d at byte %d.', $entry, $byte, $previous[0], $previous[1]));
+            }
+
+            $previous = [$entry, $byte];
+        }
     }
 
     /**

@@ -3,6 +3,19 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.1.2 — 2026-11-23
+
+### Fixed
+
+Found in a review of everything since 1.19.0; each has a test that fails on 2.1.1.
+
+- **A worker's fatal error reaches the caller.** A worker that died of a fatal error — out of memory — was reported as "ended without finishing", the reason left on its standard error. It now sends the error: `worker 1: PHP Fatal error: Allowed memory size … exhausted in …`. PHP still runs the caller's shutdown functions in it first, as on any fatal error; the README says so. A worker that ends without a word says how it ended — `ended without finishing (exit status 1)`, `(killed by signal 11)`. The PHP 8.1 of GitHub's runners runs no shutdown function after running out of memory, so there only how it ended comes through; PHP 8.1 built from the official image, and 8.2 to 8.4 everywhere, send the error.
+- **Each read from an index hands over only its own invalid entries.** A read seeks to a checkpoint before its first entry and reads one entry past its last, and `onInvalidItem` was called for every invalid entry it passed: the parts of `partitions()` handed over the ones between them two or three times, in parallel once in each worker. Now only those within the read's own entries — for lists, objects and NDJSON alike. The README shows how to bring them back from the workers, where `onInvalidItem` runs.
+- **An index keeps the file's whole path.** A relative path was kept as given, so a saved index read in another directory named another file, or none. `index()` and `indexValues()` keep `realpath()`; a path it cannot settle, a stream wrapper's, as given.
+- **A damaged index is refused.** Checkpoints are looked up by binary search, which takes them to ascend; `fromJson()` and the constructor took them in any order, and one out of place would land a read at another entry's start and number every entry after it wrongly. Checkpoints out of order, at a negative byte, past the count, or none for the first entry, and a negative count, are refused.
+- **A result that cannot be read back is that worker's failure.** A result whose class threw while being read back — or a notice from `unserialize()`, which a framework's error handler turns into an exception — escaped the wait for the workers: the ones not yet waited for were left unreaped, and the message named no worker. Now `worker 1: its result could not be read back — DomainException: …`.
+- **The wait for a worker is taken up again after a signal.** When a signal of the caller's cut `pcntl_waitpid()` short, the worker was left a zombie. Not covered by a test: the signal cannot be made to land there reliably.
+
 ## 2.1.1 — 2026-11-23
 
 ### Fixed
