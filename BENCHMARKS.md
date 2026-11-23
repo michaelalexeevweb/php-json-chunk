@@ -5,6 +5,12 @@ million. One machine, 2026-11-22, PHP 8.4, opcache off, median of 2 runs (`json_
 one at five million). Yours will differ — what carries over is the **shape** of each line, not the
 milliseconds.
 
+**Which version.** The tables were taken with 1.12.0. On 2026-11-23, 1.18.1 was measured against
+1.12.0 on the same machine, the two runs taking turns, at every size from a hundred thousand records
+to five million: the same times within noise — 55 ms against 55–58 ms at 100 000 records, 2.79–2.83 s
+against 2.76–2.91 s at five million. Nothing since has changed how fast a list is read; what did change
+is listed in the [changelog](CHANGELOG.md).
+
 Reproducible from the repository:
 
 ```bash
