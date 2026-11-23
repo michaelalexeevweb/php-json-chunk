@@ -3,6 +3,26 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.5.0 — 2026-11-23
+
+### Added
+
+- **`JsonChunkWriter`: the other half.** JSON written from an iterable an entry at a time — `writeArray()`, `writeObject()`, `writeValues()` for one document to a line — so that what is written can be as large as the disk. What it writes is what `json_encode()` of the whole would give, byte for byte, pretty-printed too, with the flags given; tested so on thousands of entries of every kind under four sets of flags. A million records: 349 ms and 0.29 MB, against 389 ms and 456 MB to gather them and encode the whole — entries are encoded 256 to a `json_encode()`. To a path it writes a temporary file beside it and renames it into place when done: an entry `json_encode()` refuses, named by its number, or an exception from the iterable, leaves the path as it was and no temporary file behind. To a stream — `php://output`, `compress.zlib://` — it writes as it goes and leaves it open. With `raw: true` it writes strings of JSON as they are: `readRaw()` into `writeArray()` copies a document unchanged, large integers and all. A key given twice by a generator is written twice, as it came — found by a test, since a batch kept in a PHP array had kept one. A file replaced keeps its permissions — found in review: a file only its owner could read came back readable by all; a path that is a link is written through, the link kept; `writeArray()` writes a list under `JSON_FORCE_OBJECT` too, the flag applying inside each entry — a batch encoded under it had come out an object cut as a list. Eight mutants, and one for each of these, all caught.
+- **`appendValues()`: adding to a log.** Documents appended to a sequence one to a line, the file locked with `flock()` meanwhile, so that processes appending at once wait for each other: four processes appending 40 000 documents to one file between them leave every line whole, none lost. A file that does not end in a line break gets one first; a missing file is made. `extendIndex()` then brings an index of the log up to it.
+- **`readFromRaw()`: an index read raw.** `readFrom()` with the entries as the JSON they are written in — of a list, an object or a sequence — each part handing over only its own invalid entries, as `readFrom()` does. A worker of `readInParallel()` copies its part with it, without a decode and an encode of each. Tested against `readFrom()` at eight offsets and limits on all three kinds of index; mutants of the window, the limit and the lock, all caught.
+- **Connections and memory in a worker**, a page of its own in `docs/index-and-parallel.md`: a connection of the worker's own, opened inside the handler; the one it was copied with left alone, since closing it — `DB::reconnect()`, `DB::purge()`, `$connection->close()`, an `unset()` — sends the driver's goodbye over the socket the caller shares; recipes for PDO, Laravel and Doctrine; and why memory made before the read is copied into a worker that only reads it, PHP counting references as it reads.
+- **The README split into pages.** It had grown past 1 600 lines. The README keeps what decides whether to use the library — what it is, how fast, how to start — and a table of the pages under `docs/`: reading, sequences, the index and parallel reads, raw JSON and validation, writing, the API. Every PHP example on every page is still run by the tests, and every link between them checked.
+- **`composer.json` suggests** `ext-pcntl` and `ext-posix` for the parallel reads and `ext-zlib` for gzip, names the docs, and has keywords for what the library now does.
+- **Recipes for Laravel, Symfony and Doctrine** in the README: a `LazyCollection` over a file and a response streamed from it, a Symfony `StreamedResponse`, records into a JSON column with DBAL without decoding them.
+
+### Fixed
+
+Found in a review of 2.4.0; each has a test that fails on it.
+
+- **`readRaw()` cut a run of objects mixed with other values wrongly.** A run is cut at every `},{` and taken to be right when it holds as many pieces as elements. That holds when every element is an object; with a number or a string among them, the place beside it is not cut, and a string holding `},{` twice made up for it — the count came out right and two "elements" were not JSON: `{"a":"}` and `{"},7,{"id":11}`. A run is taken whole now only when its elements are all objects; any other is checked a piece at a time.
+- **`readValuesRaw()` gave an indented line with its spaces.** Lines were trimmed at their end only; now at both, as the first document of a batch always was.
+- **`validate()` lost a root after much whitespace.** A root that is a number or a string is read again whole, from the blocks kept — the first two, and one after more whitespace than that was lost: `42` after 300 KB of spaces was "invalid". The blocks are kept up to the first with more than whitespace in it.
+
 ## 2.4.0 — 2026-11-23
 
 ### Added

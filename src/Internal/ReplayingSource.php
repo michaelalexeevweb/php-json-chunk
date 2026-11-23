@@ -18,6 +18,8 @@ final class ReplayingSource implements JsonSourceInterface
     /** @var array<int, string> */
     private array $kept = [];
 
+    private bool $content = false;
+
     public function __construct(private readonly JsonSourceInterface $inner)
     {
     }
@@ -25,9 +27,12 @@ final class ReplayingSource implements JsonSourceInterface
     public function readBlock(int $size): string|null
     {
         $block = $this->inner->readBlock($size);
-        // The root is known after the first block: no more is kept than two.
-        if ($block !== null && count($this->kept) < 2) {
+        // Kept up to the first block with more than whitespace in it, where the root starts: the
+        // reader knows what the root is at its first character, and reads no further. Two blocks were
+        // kept before, and a root after more whitespace than that was lost — found in review.
+        if ($block !== null && !$this->content) {
             $this->kept[] = $block;
+            $this->content = strspn($block, " \t\n\r") !== strlen($block);
         }
 
         return $block;

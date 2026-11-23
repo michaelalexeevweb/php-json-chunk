@@ -72,13 +72,13 @@ final class ReadmeExamplesTest extends TestCase
      */
     public static function readmePhpBlocks(): array
     {
-        $readme = (string)file_get_contents(dirname(__DIR__) . '/README.md');
-
-        preg_match_all('/```php\n(.*?)```/s', $readme, $matches);
-
+        // The README and the pages of docs/ it points to: an example moved there is still run.
         $blocks = [];
-        foreach ($matches[1] as $index => $block) {
-            $blocks['block ' . ($index + 1)] = [$block];
+        foreach ([dirname(__DIR__) . '/README.md', ...(array)glob(dirname(__DIR__) . '/docs/*.md')] as $file) {
+            preg_match_all('/```php\n(.*?)```/s', (string)file_get_contents((string)$file), $matches);
+            foreach ($matches[1] as $index => $block) {
+                $blocks[basename((string)$file) . ' block ' . ($index + 1)] = [$block];
+            }
         }
 
         self::assertNotSame([], $blocks, 'no PHP blocks found in the README');

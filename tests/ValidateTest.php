@@ -73,6 +73,23 @@ final class ValidateTest extends TestCase
     }
 
     /**
+     * Found in review: the first two blocks were kept to read a root that is not a container again,
+     * and one after more whitespace than that was lost — 42 after 300 KB of spaces was "invalid".
+     */
+    public function testARootAfterMuchWhitespaceIsReadWhole(): void
+    {
+        $handle = fopen('php://memory', 'r+b');
+        self::assertIsResource($handle);
+        fwrite($handle, str_repeat(" \n", 150_000) . '42');
+        rewind($handle);
+
+        self::assertNull((new JsonChunkReader())->validate(new StringSource(str_repeat(' ', 300_000) . '42')));
+        self::assertNull((new JsonChunkReader())->validate(new StreamSource($handle)));
+        self::assertSame('Syntax error', (new JsonChunkReader())->validate(new StringSource(str_repeat(' ', 300_000) . '4 2'))?->reason);
+        fclose($handle);
+    }
+
+    /**
      * @return iterable<string, array{0: string, 1: string, 2: int|null}>
      */
     public static function invalid(): iterable

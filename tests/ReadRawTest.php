@@ -153,6 +153,52 @@ final class ReadRawTest extends TestCase
         self::assertStringContainsString('at byte 15', $message('readRaw'));
     }
 
+    /**
+     * Found in review: a run is cut at every `},{`, and as many pieces as elements was taken to mean
+     * each piece an element. With an element that is not an object, the place before or after it is
+     * not cut, and a string holding `},{` twice made up for it: the count came out right and two pieces
+     * were not JSON — `{"a":"}` and `{"},7,{"id":11}`.
+     *
+     * @return iterable<string, array{0: string}>
+     */
+    public static function mixedRuns(): iterable
+    {
+        $objects = array_map(static fn(int $i): string => '{"id":' . $i . '}', range(0, 29));
+        $with = static function (array $at) use ($objects): string {
+            $elements = $objects;
+            foreach ($at as $position => $element) {
+                array_splice($elements, $position, 0, [$element]);
+            }
+
+            return '[' . implode(',', $elements) . ']';
+        };
+        yield 'a number after a string with two cuts' => [$with([10 => '{"a":"},{},{"}', 11 => '7'])];
+        yield 'a string element between' => [$with([10 => '{"a":"},{},{"}', 11 => '"s"'])];
+        yield 'a list element between' => [$with([10 => '{"a":"},{},{"}', 11 => '[{"x":1},{"y":2}]'])];
+        yield 'null first' => [$with([0 => 'null', 5 => '{"b":"},{},{"}'])];
+    }
+
+    #[DataProvider('mixedRuns')]
+    public function testARunOfObjectsAndOthersIsCutOnlyBetweenElements(string $document): void
+    {
+        $reader = new JsonChunkReader();
+        $raw = iterator_to_array($reader->readRaw(new StringSource($document)));
+
+        self::assertSame(json_decode($document, true), array_map(static fn(string $json): mixed => json_decode($json, true, 512, JSON_THROW_ON_ERROR), $raw));
+    }
+
+    /**
+     * Found in review: a line was trimmed of its end only, and one indented came with its spaces —
+     * the first document of a batch had none, starting where it starts, the others kept theirs.
+     */
+    public function testALineComesWithoutTheSpacesAroundIt(): void
+    {
+        self::assertSame(
+            ['{"a":1}', '{"b":2}', '[3]', '4'],
+            iterator_to_array((new JsonChunkReader())->readValuesRaw(new StringSource("{\"a\":1}\n  {\"b\":2}  \n\t[3]\r\n 4\n"))),
+        );
+    }
+
     public function testLimitOffsetAndWhatFollowsTheRoot(): void
     {
         $reader = new JsonChunkReader();

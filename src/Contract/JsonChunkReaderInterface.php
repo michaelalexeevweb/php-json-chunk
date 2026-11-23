@@ -169,6 +169,16 @@ interface JsonChunkReaderInterface
     public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator;
 
     /**
+     * readFrom(), the entries as the JSON they are written in.
+     *
+     * @return Generator<int|string, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readFromRaw(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator;
+
+    /**
      * An index of a sequence brought up to a file that has grown since, reading only what is new.
      * Refused when the file was changed rather than appended to.
      *

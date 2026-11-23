@@ -1,8 +1,14 @@
 {
     "name": "michaelalexeevweb/php-json-chunk",
-    "description": "The fastest streaming JSON reader for PHP — 15–21× faster than JsonMachine, within reach of json_decode(), at 0.16 MB. Read large JSON files one item at a time: arrays or objects, in chunks, iterators or generators.",
+    "description": "The fastest streaming JSON reader for PHP, and a writer to match — read and write JSON larger than memory, an item at a time: arrays, objects, NDJSON; raw, validated, indexed, in parallel. 15–21× faster than JsonMachine at 0.16 MB.",
     "type": "library",
     "license": "MIT",
+    "homepage": "https://github.com/michaelalexeevweb/php-json-chunk",
+    "support": {
+        "issues": "https://github.com/michaelalexeevweb/php-json-chunk/issues",
+        "source": "https://github.com/michaelalexeevweb/php-json-chunk",
+        "docs": "https://github.com/michaelalexeevweb/php-json-chunk/tree/master/docs"
+    },
     "keywords": [
         "php",
         "json",
@@ -23,10 +29,24 @@
         "parse-large-json",
         "json-decode",
         "fast",
-        "high-performance"
+        "high-performance",
+        "ndjson",
+        "jsonl",
+        "json-lines",
+        "json-writer",
+        "streaming-json-writer",
+        "json-index",
+        "json-validator",
+        "parallel",
+        "pcntl"
     ],
     "require": {
         "php": ">=8.1"
+    },
+    "suggest": {
+        "ext-pcntl": "readInParallel(), forEachInParallel() and indexValues() with workers fork processes",
+        "ext-posix": "lets a parallel worker end without running the caller's destructors and shutdown functions",
+        "ext-zlib": "reading and writing gzipped JSON through compress.zlib:// streams"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.5",

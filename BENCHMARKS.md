@@ -139,7 +139,7 @@ Every other column hands back a PHP value for each element, and the benchmark it
 
 ## Every reader and every block size
 
-The same documents again, with this library at each of its [block sizes](README.md#block-size-memory-against-speed)
+The same documents again, with this library at each of its [block sizes](docs/reading.md#block-size-memory-against-speed)
 — time in milliseconds. Its nine rows come from their own run, five rounds each; `Kb64`, which every
 earlier figure on this page was measured with, read 100 000 records in 54.0 ms there and 53.9 ms in the
 run above, so the rows sit together fairly.
@@ -165,7 +165,7 @@ run above, so the rows sit together fairly.
 On records this small the block hardly moves the time — `Kb8` is 15% behind at worst, and everything
 from 32 KB up is within a few percent — while memory goes from 0.10 MB to 2 MB. `Auto` stays at 64 KB on
 such records and reads like `Kb64`. Where the block decides the time is large elements; the README
-[measures that](README.md#block-size-memory-against-speed).
+[measures that](docs/reading.md#block-size-memory-against-speed).
 
 ## An index, and workers side by side
 
