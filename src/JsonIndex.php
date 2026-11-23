@@ -73,6 +73,34 @@ final class JsonIndex
     }
 
     /**
+     * The container's entries split into at most $parts runs of consecutive entries, as even as can be
+     * — sizes differ by one at most — for separate workers to read side by side, each with
+     * JsonChunkReader::readFrom($index, $offset, $limit). No part is empty, so there are fewer parts
+     * than asked when there are fewer entries.
+     *
+     * @return array<int, array{offset: int, limit: int}>
+     *
+     * @throws InvalidArgumentException
+     */
+    public function partitions(int $parts): array
+    {
+        if ($parts < 1) {
+            throw new InvalidArgumentException('At least one part is needed.');
+        }
+
+        $parts = min($parts, $this->count);
+        $partitions = [];
+        $offset = 0;
+        for ($part = 0; $part < $parts; $part++) {
+            $limit = intdiv($this->count, $parts) + ($part < $this->count % $parts ? 1 : 0);
+            $partitions[] = ['offset' => $offset, 'limit' => $limit];
+            $offset += $limit;
+        }
+
+        return $partitions;
+    }
+
+    /**
      * @throws JsonException
      */
     public function toJson(): string

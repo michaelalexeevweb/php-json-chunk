@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.19.0
+composer require michaelalexeevweb/php-json-chunk:^1.20.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -536,7 +536,7 @@ For a file, wrap a `FileSource`: `new FileSource(new SplFileObject($path, 'rb'),
 
 ### Jumping to entry four million: an index
 
-Reading entry 4 999 000 of a 400 MB list means reading the 4 998 999 before it — 2.9 s, every time. An
+Reading entry 4 999 999 of a 400 MB list means reading the 4 999 998 before it — 2.4 s, every time. An
 index remembers where entries start, about every thousandth, and a read from it seeks to the nearest
 one instead:
 
@@ -556,17 +556,75 @@ unlink($path);
 unlink($path . '.idx');
 ```
 
-| 5 000 000 records (404 MB) | time |
+| 5 000 000 records (404 MB) | time |
 |---|---:|
-| `getNth(4_999_000)`, no index | 2 869 ms |
-| building the index, once | 4.0 s |
-| `readFrom($index, 4_999_000, 1)` | 0.28 ms |
+| `getNth(4_999_999)`, no index | 2.38 s |
+| building the index, once | 2.17 s |
+| `readFrom($index, 4_999_999, 1)` | 0.2 ms |
 
 `readFrom()` gives what `readGenerator()` with the same key path, offset and limit gives, keys included.
 The index of five million records saves as 94 KB. It is of one container — a list or an object, no
 wildcard — in a file, not a stream, since reading from it seeks; and it belongs to the file as it was:
 a file whose size or modification time has changed since is refused, rather than read at the wrong
 places.
+
+### Several processes at once
+
+An index also splits the work. `partitions()` cuts the entries into runs of consecutive entries, as even
+as can be, and each is read with `readFrom()` — by any kind of worker: queue jobs, separate commands,
+cron entries.
+
+```php
+$path = tempnam(sys_get_temp_dir(), 'export');
+file_put_contents($path, json_encode(['users' => array_map(fn($i) => ['id' => $i], range(0, 9999))]));
+$index = $reader->index($path, 'users');
+
+foreach ($index->partitions(4) as ['offset' => $offset, 'limit' => $limit]) {
+    // hand ($offset, $limit) — and the index, saved with toJson() — to a worker, which reads:
+    $first = $reader->readFrom($index, $offset, $limit)->current();
+    echo $offset, '+', $limit, ' starts at id ', $first['id'], PHP_EOL;   // 0+2500, 2500+2500, ...
+}
+
+unlink($path);
+```
+
+On PHP's command line on Linux or macOS, `forEachInParallel()` forks the workers itself and waits for
+them; when any fails, it throws with what each failed with:
+
+```php
+// Recipe: needs pcntl (PHP's command line on Linux or macOS) — checked for syntax by the tests, not run.
+$index = $reader->index('/data/export.json', 'users');
+
+$reader->forEachInParallel($index, 6, function (array $user, int $number): void {
+    // runs in a worker: open connections here, not before the fork
+    save($user);
+});
+```
+
+The handler runs in the workers: what it does must reach beyond the process — a database, a file, a
+queue — and a connection it uses is opened inside it, since one opened before the fork would be shared
+by every worker. Measured on five million records, each encoded and hashed
+(`php bin/benchmark-index.php`):
+
+| workers | time | against a plain read |
+|---:|---:|---:|
+| none (a plain read) | 4.54 s | |
+| 1 | 4.96 s | 0.9× |
+| 2 | 2.54 s | 1.8× |
+| 4 | 1.30 s | 3.5× |
+| 6 | 0.88 s | 5.1× |
+| 8 | 0.75 s | 6.0× |
+| 12 | 0.62 s | 7.3× |
+| 16 | 0.62 s | 7.3× |
+
+Twelve cores here — six performance, six efficiency — and twelve workers is where it stops getting
+faster. One worker is a little slower than a plain loop: the handler is a call per record, and the fork
+costs something; parallel pays from two. Building the index took 2.17 s, once.
+
+At most 256 workers are forked (`JsonChunkReader::MAX_WORKERS`) — not tied to the cores, since a handler
+that waits on a database or the network gains from more workers than there are cores, but bounded, so
+that a mistyped number cannot fork one process per entry. If a worker cannot be started, the ones
+already running are waited for before the exception.
 
 ### Block size: memory against speed
 

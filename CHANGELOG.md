@@ -3,6 +3,15 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.20.0 — 2026-11-23
+
+### Added
+
+- **Reading in parallel.** `JsonIndex::partitions($n)` cuts an indexed container into at most `$n` runs of consecutive entries, their sizes differing by one at most, each to be read with `readFrom()` by whatever runs your workers — queue jobs, separate commands. `forEachInParallel($index, $workers, $handler)` forks the workers itself, on PHP's command line on Linux or macOS, calls the handler with every entry and its key in them, and throws with what each worker failed with when any did. Five million records, each encoded and hashed: 4.54 s read plainly, 1.30 s with 4 workers, 0.88 s with 6, 0.62 s with 12 — the twelve cores here, six performance and six efficiency, are where it stops getting faster. `bin/benchmark-index.php` measures it.
+  - The handler runs in the workers, so what it does must reach beyond the process, and a connection it uses is opened inside it rather than before the fork.
+  - At most 256 workers (`JsonChunkReader::MAX_WORKERS`): not tied to the cores, since a handler waiting on a database or the network gains from more, but bounded — without it a mistyped number forked one process per entry, which the tests caught as a thousand processes for a thousand records. When a worker cannot be started, those already running are waited for before the exception.
+  - The tests fork in a PHP process of their own, never in the test runner's; they check that the workers read every entry once between them, with its key, and that a worker's failure reaches the caller.
+
 ## 1.19.0 — 2026-11-23
 
 ### Added

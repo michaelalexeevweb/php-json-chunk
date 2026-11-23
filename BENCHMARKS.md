@@ -167,6 +167,43 @@ from 32 KB up is within a few percent — while memory goes from 0.10 MB to 2 MB
 such records and reads like `Kb64`. Where the block decides the time is large elements; the README
 [measures that](README.md#block-size-memory-against-speed).
 
+## An index, and workers side by side
+
+Reproducible with:
+
+```bash
+php bin/benchmark-index.php --workers=1,2,4,6,8,12,16
+```
+
+The same five million records, 1.19.0's index and 1.20.0's workers, one run on a quiet machine
+(2026-11-23, twelve cores: six performance, six efficiency):
+
+| | time |
+|---|---:|
+| building the index — 4 929 checkpoints, saved as 94 KB | 2.17 s |
+| `getNth(4_999_999)`, no index | 2.38 s |
+| `readFrom($index, 4_999_999, 1)` | 0.0002 s |
+
+One pass with every record encoded and hashed — light work, as any real handler's is at the least:
+
+| workers | time | against a plain read |
+|---:|---:|---:|
+| none (a plain read) | 4.54 s | |
+| 1 | 4.96 s | 0.9× |
+| 2 | 2.54 s | 1.8× |
+| 4 | 1.30 s | 3.5× |
+| 6 | 0.88 s | 5.1× |
+| 8 | 0.75 s | 6.0× |
+| 12 | 0.62 s | 7.3× |
+| 16 | 0.62 s | 7.3× |
+
+It grows with the workers up to the cores and stops there. One worker is slower than a plain loop — a
+call per record, and a fork. A handler that waits on a database or the network gains from more workers
+than cores; this one does not wait.
+
+A run with the machine busy — a virtual machine taking two cores — gave 5.2× at six workers and *less* at
+twelve than at eight: the workers had no cores to run on. Measure on a quiet machine.
+
 ## Method
 
 - Dataset: synthetic root-array JSON, identical for every parser, four fields per record:

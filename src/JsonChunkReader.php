@@ -116,6 +116,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private const RUN_BYTES = 4096;
 
     /**
+     * The most processes forEachInParallel() forks. Not tied to the cores: a handler that waits on a
+     * database or the network gains from more workers than there are cores. But each is a process, and
+     * without a bound a mistyped number forks one per entry — five million of them for a five-million-
+     * record file. Past this, spread JsonIndex::partitions() over machines instead.
+     */
+    public const MAX_WORKERS = 256;
+
+    /**
      * @throws InvalidArgumentException
      * @throws RuntimeException
      *
@@ -4854,6 +4862,117 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         } finally {
             $stream->close();
         }
+    }
+
+    /**
+     * Reads an indexed container with $workers processes side by side: the entries split by
+     * JsonIndex::partitions(), each part read by a process forked for it, $handler called with every
+     * entry and its key. Returns when every worker has finished; when any failed, throws with what
+     * each failed with.
+     *
+     * The handler runs in the workers, so what it does must reach beyond the process — a database, a
+     * file, a queue; a value it changes in the parent's memory changes in its own copy only. Open such
+     * connections inside the handler, not before: a connection opened before the fork is shared by
+     * every worker, and they would talk over each other on it.
+     *
+     * Needs pcntl — PHP's command line on Linux or macOS. Elsewhere, split the work with
+     * JsonIndex::partitions() and hand the parts to whatever runs your workers.
+     *
+     * @param callable(mixed, int|string): mixed $handler
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void
+    {
+        if ($workers < 1) {
+            throw new InvalidArgumentException('At least one worker is needed.');
+        }
+
+        if ($workers > self::MAX_WORKERS) {
+            throw new InvalidArgumentException(sprintf(
+                'At most %d workers are forked; %d were asked for. For more, spread JsonIndex::partitions() over machines.',
+                self::MAX_WORKERS,
+                $workers,
+            ));
+        }
+
+        if (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid')) {
+            throw new RuntimeException(
+                'forEachInParallel() needs pcntl, which PHP has on the command line on Linux and macOS. '
+                . 'Split the work with JsonIndex::partitions() and give the parts to your own workers.',
+            );
+        }
+
+        // Checked once here, before anything is forked: a changed file is refused by every worker anyway.
+        $this->readFrom($index, 0, 1);
+
+        $children = [];
+        foreach ($index->partitions($workers) as $part => ['offset' => $offset, 'limit' => $limit]) {
+            // When a worker cannot be started, those already forked are waited for, not left running.
+            $channel = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            if ($channel === false) {
+                $this->waitForWorkers($children);
+
+                throw new RuntimeException(sprintf('Unable to open a channel to worker %d.', $part + 1));
+            }
+
+            $pid = pcntl_fork();
+            if ($pid === -1) {
+                fclose($channel[0]);
+                fclose($channel[1]);
+                $this->waitForWorkers($children);
+
+                throw new RuntimeException(sprintf('Unable to fork worker %d.', $part + 1));
+            }
+
+            if ($pid === 0) {
+                fclose($channel[0]);
+                $status = 0;
+                try {
+                    foreach ($this->readFrom($index, $offset, $limit) as $key => $item) {
+                        $handler($item, $key);
+                    }
+                } catch (Throwable $exception) {
+                    fwrite($channel[1], $exception::class . ': ' . $exception->getMessage());
+                    $status = 1;
+                }
+
+                fclose($channel[1]);
+
+                exit($status);
+            }
+
+            fclose($channel[1]);
+            $children[$pid] = [$part, $channel[0]];
+        }
+
+        $failures = $this->waitForWorkers($children);
+        if ($failures !== []) {
+            throw new RuntimeException('Parallel read failed — ' . implode('; ', $failures));
+        }
+    }
+
+    /**
+     * Waits for every worker and closes its channel; returns what each that failed failed with.
+     *
+     * @param array<int, array{0: int, 1: resource}> $children
+     *
+     * @return array<int, string>
+     */
+    private function waitForWorkers(array $children): array
+    {
+        $failures = [];
+        foreach ($children as $pid => [$part, $channel]) {
+            $message = (string)stream_get_contents($channel);
+            fclose($channel);
+            pcntl_waitpid($pid, $status);
+            if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) {
+                $failures[] = sprintf('worker %d: %s', $part, $message !== '' ? $message : 'ended without finishing');
+            }
+        }
+
+        return $failures;
     }
 
     /**

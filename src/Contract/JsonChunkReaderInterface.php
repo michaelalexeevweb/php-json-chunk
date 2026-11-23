@@ -157,6 +157,17 @@ interface JsonChunkReaderInterface
     public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator;
 
     /**
+     * Reads an indexed container with $workers processes forked side by side, $handler called in them
+     * with every entry and its key. Needs pcntl.
+     *
+     * @param callable(mixed, int|string): mixed $handler
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void;
+
+    /**
      * Several key paths, read in ONE pass over the document, yielding `path => value`.
      *
      * The key is the path that matched, so a `foreach` reads as "this value, from that path".
