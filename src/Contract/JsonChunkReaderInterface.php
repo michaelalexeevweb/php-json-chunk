@@ -9,6 +9,7 @@ use InvalidArgumentException;
 use Iterator;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\JsonIndex;
+use PhpJsonChunk\Partition;
 use RuntimeException;
 
 /**
@@ -166,6 +167,21 @@ interface JsonChunkReaderInterface
      * @throws RuntimeException
      */
     public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void;
+
+    /**
+     * Reads an indexed container with $workers processes forked side by side, $handler called once in
+     * each with a generator of its part's entries; returns what each returned, by part. Needs pcntl.
+     *
+     * @template T
+     *
+     * @param callable(Generator<int|string, mixed>, Partition): T $handler
+     *
+     * @return array<int, T>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readInParallel(JsonIndex $index, int $workers, callable $handler): array;
 
     /**
      * Several key paths, read in ONE pass over the document, yielding `path => value`.

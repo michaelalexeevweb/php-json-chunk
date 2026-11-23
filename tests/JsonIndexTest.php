@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpJsonChunk\Tests;
 
 use InvalidArgumentException;
+use PhpJsonChunk\Checkpoint;
 use PhpJsonChunk\JsonChunkReader;
 use PhpJsonChunk\JsonIndex;
 use PhpJsonChunk\JsonPointer;
@@ -82,15 +83,18 @@ final class JsonIndexTest extends TestCase
         $index = (new JsonChunkReader())->index($path, every: 1000);
 
         $previous = null;
-        foreach ($index->checkpoints() as [$entry, $byte]) {
-            self::assertIsInt($byte);
+        foreach ($index->checkpoints() as $checkpoint) {
+            self::assertInstanceOf(Checkpoint::class, $checkpoint);
             if ($previous !== null) {
-                self::assertGreaterThan($previous, $entry);
-                self::assertLessThanOrEqual(1100, $entry - $previous);
+                self::assertGreaterThan($previous, $checkpoint->entry);
+                self::assertLessThanOrEqual(1100, $checkpoint->entry - $previous);
             }
-            $previous = $entry;
+            $previous = $checkpoint->entry;
         }
-        self::assertSame(0, $index->checkpoints()[0][0]);
+        self::assertSame(0, $index->checkpoints()[0]->entry);
+        self::assertSame(0, $index->checkpointBefore(0)?->entry);
+        self::assertSame(1, $index->checkpointBefore(0)?->byte);
+        self::assertSame($index->checkpoints()[1]->entry, $index->checkpointBefore($index->checkpoints()[1]->entry + 5)?->entry);
         self::assertGreaterThanOrEqual(18, count($index->checkpoints()));
     }
 

@@ -116,12 +116,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private const RUN_BYTES = 4096;
 
     /**
-     * The most processes forEachInParallel() forks. Not tied to the cores: a handler that waits on a
+     * The most processes forEachInParallel() and readInParallel() fork. Not tied to the cores: a handler that waits on a
      * database or the network gains from more workers than there are cores. But each is a process, and
      * without a bound a mistyped number forks one per entry — five million of them for a five-million-
      * record file. Past this, spread JsonIndex::partitions() over machines instead.
      */
     public const MAX_WORKERS = 256;
+
+    /** Starts what a worker sends back when it finished, so that a failure's message is never taken for a result. */
+    private const WORKER_DONE = "\x00done\x00";
 
     /**
      * @throws InvalidArgumentException
@@ -4838,7 +4841,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return;
         }
 
-        [$entry, $byte] = $checkpoint;
+        $entry = $checkpoint->entry;
+        $byte = $checkpoint->byte;
         $stream = $this->openFile($index->path, $byte);
         try {
             // The checkpoint must still be where an entry starts — a cheap guard against an index
@@ -4885,6 +4889,50 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void
     {
+        $this->runInParallel($index, $workers, 'forEachInParallel', static function (Generator $entries) use ($handler): void {
+            foreach ($entries as $key => $item) {
+                $handler($item, $key);
+            }
+        }, false);
+    }
+
+    /**
+     * Reads an indexed container with $workers processes side by side, as forEachInParallel() does,
+     * but hands each worker its whole part — a generator of `key => entry` — and gives back what each
+     * returned: a total, a count, a list of ids, whatever the parts are to be put together from.
+     *
+     * The results come back in the order of the parts, keyed 0, 1, 2 …, each sent from its worker by
+     * serialize(), so a result must be one serialize() takes — no closures, no open resources — and
+     * is held in the caller's memory: return what the part adds up to, not the part.
+     *
+     * @template T
+     *
+     * @param callable(Generator<int|string, mixed>, Partition): T $handler called once in every worker,
+     *                                                                      with its entries and its part
+     *
+     * @return array<int, T>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readInParallel(JsonIndex $index, int $workers, callable $handler): array
+    {
+        return $this->runInParallel($index, $workers, 'readInParallel', $handler, true);
+    }
+
+    /**
+     * Forks one worker for each part, runs $work in it over the part's entries and waits for all; with
+     * $send, what $work returns is sent back and collected by part.
+     *
+     * @param callable(Generator<int|string, mixed>, Partition): mixed $work
+     *
+     * @return array<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function runInParallel(JsonIndex $index, int $workers, string $method, callable $work, bool $send): array
+    {
         if ($workers < 1) {
             throw new InvalidArgumentException('At least one worker is needed.');
         }
@@ -4899,7 +4947,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         if (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid')) {
             throw new RuntimeException(
-                'forEachInParallel() needs pcntl, which PHP has on the command line on Linux and macOS. '
+                $method . '() needs pcntl, which PHP has on the command line on Linux and macOS. '
                 . 'Split the work with JsonIndex::partitions() and give the parts to your own workers.',
             );
         }
@@ -4908,7 +4956,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $this->readFrom($index, 0, 1);
 
         $children = [];
-        foreach ($index->partitions($workers) as $part => ['offset' => $offset, 'limit' => $limit]) {
+        foreach ($index->partitions($workers) as $partition) {
+            $part = $partition->number;
             // When a worker cannot be started, those already forked are waited for, not left running.
             $channel = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
             if ($channel === false) {
@@ -4930,12 +4979,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 fclose($channel[0]);
                 $status = 0;
                 try {
-                    foreach ($this->readFrom($index, $offset, $limit) as $key => $item) {
-                        $handler($item, $key);
-                    }
+                    $result = $work($this->readFrom($index, $partition->offset, $partition->limit), $partition);
+                    $message = self::WORKER_DONE . ($send ? serialize($result) : '');
                 } catch (Throwable $exception) {
-                    fwrite($channel[1], $exception::class . ': ' . $exception->getMessage());
+                    $message = $exception::class . ': ' . $exception->getMessage();
                     $status = 1;
+                }
+
+                // A socket may take a long result in several writes; each returns how much it took.
+                for ($written = 0, $length = strlen($message); $written < $length; $written += $chunk) {
+                    $chunk = fwrite($channel[1], substr($message, $written));
+                    if ($chunk === false || $chunk === 0) {
+                        $status = 1;
+
+                        break;
+                    }
                 }
 
                 fclose($channel[1]);
@@ -4947,28 +5005,52 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $children[$pid] = [$part, $channel[0]];
         }
 
-        $failures = $this->waitForWorkers($children);
+        $results = [];
+        $failures = $this->waitForWorkers($children, $results, $send);
         if ($failures !== []) {
             throw new RuntimeException('Parallel read failed — ' . implode('; ', $failures));
         }
+
+        ksort($results);
+
+        return $results;
     }
 
     /**
-     * Waits for every worker and closes its channel; returns what each that failed failed with.
+     * Waits for every worker and closes its channel; returns what each that failed failed with, and
+     * puts what each that finished sent back into $results by its part.
      *
      * @param array<int, array{0: int, 1: resource}> $children
+     * @param array<int, mixed> $results
      *
      * @return array<int, string>
      */
-    private function waitForWorkers(array $children): array
+    private function waitForWorkers(array $children, array &$results = [], bool $send = false): array
     {
         $failures = [];
         foreach ($children as $pid => [$part, $channel]) {
+            // Read to the end before waiting: a worker with a long result is still writing it.
             $message = (string)stream_get_contents($channel);
             fclose($channel);
             pcntl_waitpid($pid, $status);
-            if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) {
-                $failures[] = sprintf('worker %d: %s', $part, $message !== '' ? $message : 'ended without finishing');
+            $finished = pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0
+                && str_starts_with($message, self::WORKER_DONE);
+            if (!$finished) {
+                $failures[] = sprintf('worker %d: %s', $part, $message !== '' && !str_starts_with($message, self::WORKER_DONE) ? $message : 'ended without finishing');
+
+                continue;
+            }
+
+            if ($send) {
+                $payload = substr($message, strlen(self::WORKER_DONE));
+                $result = unserialize($payload);
+                if ($result === false && $payload !== serialize(false)) {
+                    $failures[] = sprintf('worker %d: its result could not be read back', $part);
+
+                    continue;
+                }
+
+                $results[$part] = $result;
             }
         }
 

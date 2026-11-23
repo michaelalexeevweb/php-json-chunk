@@ -6,12 +6,13 @@ namespace PhpJsonChunk\Tests;
 
 use InvalidArgumentException;
 use PhpJsonChunk\JsonChunkReader;
+use PhpJsonChunk\Partition;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
  * An indexed file split into parts that separate processes read side by side: JsonIndex::partitions()
- * for any kind of worker, and forEachInParallel() to fork the workers on the spot.
+ * for any kind of worker, and forEachInParallel() and readInParallel() to fork the workers on the spot.
  */
 final class ParallelTest extends TestCase
 {
@@ -67,11 +68,13 @@ final class ParallelTest extends TestCase
 
         $next = 0;
         $sizes = [];
-        foreach ($partitions as ['offset' => $offset, 'limit' => $limit]) {
-            self::assertSame($next, $offset);
-            self::assertGreaterThan(0, $limit);
-            $sizes[] = $limit;
-            $next += $limit;
+        foreach ($partitions as $number => $partition) {
+            self::assertInstanceOf(Partition::class, $partition);
+            self::assertSame($number, $partition->number);
+            self::assertSame($next, $partition->offset);
+            self::assertGreaterThan(0, $partition->limit);
+            $sizes[] = $partition->limit;
+            $next += $partition->limit;
         }
         self::assertSame($count, $next);
         if ($sizes !== []) {
@@ -79,8 +82,8 @@ final class ParallelTest extends TestCase
         }
 
         $read = [];
-        foreach ($partitions as ['offset' => $offset, 'limit' => $limit]) {
-            foreach ($reader->readFrom($index, $offset, $limit) as $key => $item) {
+        foreach ($partitions as $partition) {
+            foreach ($reader->readFrom($index, $partition->offset, $partition->limit) as $key => $item) {
                 $read[$key] = $item;
             }
         }
@@ -167,6 +170,23 @@ echo json_encode(["error" => $error, "ids" => $ids, "workers" => count($pids), "
     }
 
     /**
+     * A handler that calls exit(0) ends its worker as a finished one would. 1.20.0 took that for a
+     * finished part, and the entries after it were never handled with no word said.
+     */
+    public function testAWorkerThatExitsHalfwayIsAFailure(): void
+    {
+        $result = $this->runWorkers(
+            $this->listFile(2000),
+            2,
+            'if ($user["id"] === 1500) { exit(0); }',
+        );
+
+        self::assertIsString($result['error']);
+        self::assertStringContainsString('worker 1: ended without finishing', $result['error']);
+        self::assertStringNotContainsString('worker 0', $result['error']);
+    }
+
+    /**
      * Found in review of the release: the number of workers was bounded only by the number of entries,
      * so a mistyped 12912930129 over five million records would have forked five million processes.
      */
@@ -191,5 +211,205 @@ echo json_encode(["error" => $error, "ids" => $ids, "workers" => count($pids), "
 
         $reader->forEachInParallel($index, 0, static function (): void {
         });
+    }
+
+    /**
+     * readInParallel() forks too: $body runs in a PHP process of its own with $reader and $index over
+     * $path, and sets $answer, which comes back JSON-encoded.
+     *
+     * @return array<string, mixed>
+     */
+    private function runScript(string $path, string $body): array
+    {
+        if (!function_exists('pcntl_fork')) {
+            self::markTestSkipped('pcntl is not available.');
+        }
+
+        $script = $this->directory . '/script.php';
+        file_put_contents($script, '<?php
+require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';
+$reader = new PhpJsonChunk\JsonChunkReader();
+$index = $reader->index(' . var_export($path, true) . ', "users", every: 100);
+try {
+    ' . $body . '
+} catch (Throwable $exception) {
+    $answer = ["error" => get_class($exception) . ": " . $exception->getMessage()];
+}
+echo json_encode($answer);
+');
+
+        $output = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($script) . ' 2>&1');
+        $answer = json_decode($output, true);
+        self::assertIsArray($answer, $output);
+
+        return $answer;
+    }
+
+    public function testEachPartsResultComesBackInTheOrderOfTheParts(): void
+    {
+        $answer = $this->runScript($this->listFile(5003), '
+            $results = $reader->readInParallel($index, 4, function (Generator $users, PhpJsonChunk\Partition $part): array {
+                $count = 0;
+                $sum = 0;
+                $keys = [];
+                foreach ($users as $key => $user) {
+                    if ($key !== $user["id"]) {
+                        throw new RuntimeException("key " . $key);
+                    }
+                    $count++;
+                    $sum += $user["id"];
+                    $keys[] = $key;
+                }
+
+                return ["part" => $part->number, "offset" => $part->offset, "limit" => $part->limit, "pid" => getmypid(), "count" => $count, "sum" => $sum, "first" => $keys[0], "last" => end($keys)];
+            });
+            $answer = ["results" => $results, "keys" => array_keys($results), "parent" => getmypid()];
+        ');
+
+        self::assertArrayNotHasKey('error', $answer);
+        self::assertSame([0, 1, 2, 3], $answer['keys']);
+        self::assertSame([0, 1, 2, 3], array_column($answer['results'], 'part'));
+        self::assertSame([1251, 1251, 1251, 1250], array_column($answer['results'], 'count'));
+        self::assertSame([0, 1251, 2502, 3753], array_column($answer['results'], 'first'));
+        self::assertSame([0, 1251, 2502, 3753], array_column($answer['results'], 'offset'));
+        self::assertSame([1251, 1251, 1251, 1250], array_column($answer['results'], 'limit'));
+        self::assertSame([1250, 2501, 3752, 5002], array_column($answer['results'], 'last'));
+        self::assertSame(array_sum(range(0, 5002)), array_sum(array_column($answer['results'], 'sum')));
+        $pids = array_column($answer['results'], 'pid');
+        self::assertCount(4, array_unique($pids));
+        self::assertNotContains($answer['parent'], $pids);
+    }
+
+    /**
+     * A result far larger than a socket's buffer is written in many pieces, and every worker writes
+     * its own while the caller is still reading another's.
+     */
+    public function testALargeResultComesBackWhole(): void
+    {
+        $answer = $this->runScript($this->listFile(3000), '
+            $results = $reader->readInParallel($index, 3, function (Generator $users): array {
+                $rows = [];
+                foreach ($users as $user) {
+                    $rows[] = $user["id"] . ":" . str_repeat("x", 1000);
+                }
+
+                return $rows;
+            });
+            $rows = array_merge(...$results);
+            $answer = ["count" => count($rows), "bytes" => strlen(implode("", $rows)), "same" => $rows === array_map(fn($i) => $i . ":" . str_repeat("x", 1000), range(0, 2999))];
+        ');
+
+        self::assertArrayNotHasKey('error', $answer);
+        self::assertSame(3000, $answer['count']);
+        self::assertTrue($answer['same']);
+    }
+
+    /**
+     * false, null, an object: each is a result, sent and read back as it was — false most of all, as
+     * unserialize() answers false when it cannot read a thing.
+     */
+    public function testEveryKindOfResultComesBackAsItWas(): void
+    {
+        $answer = $this->runScript($this->listFile(40), '
+            $results = $reader->readInParallel($index, 4, function (Generator $users, PhpJsonChunk\Partition $part): mixed {
+                iterator_to_array($users);
+
+                return [false, null, new ArrayObject(["part" => $part->number]), 1.5][$part->number];
+            });
+            $answer = ["dump" => var_export($results[0], true) . "|" . var_export($results[1], true) . "|" . get_class($results[2]) . ":" . $results[2]["part"] . "|" . var_export($results[3], true)];
+        ');
+
+        self::assertSame(['dump' => 'false|NULL|ArrayObject:2|1.5'], $answer);
+    }
+
+    /**
+     * The README's way: an object of the caller's own class returned by each worker comes back an
+     * object of that class, its properties set.
+     */
+    public function testADtoComesBackWithItsClass(): void
+    {
+        $answer = $this->runScript($this->listFile(1000), '
+            final class IdsTotal
+            {
+                /** @param list<int> $odd */
+                public function __construct(public readonly int $total, public readonly array $odd)
+                {
+                }
+            }
+
+            $parts = $reader->readInParallel($index, 3, function (Generator $users): IdsTotal {
+                $total = 0;
+                $odd = [];
+                foreach ($users as $number => $user) {
+                    $total += $user["id"];
+                    if ($user["id"] % 2 === 1 && $number < 10) {
+                        $odd[] = $number;
+                    }
+                }
+
+                return new IdsTotal($total, $odd);
+            });
+            $answer = [
+                "classes" => array_map("get_class", $parts),
+                "total" => array_sum(array_map(static fn(IdsTotal $part): int => $part->total, $parts)),
+                "odd" => array_merge(...array_map(static fn(IdsTotal $part): array => $part->odd, $parts)),
+            ];
+        ');
+
+        self::assertSame(['classes' => ['IdsTotal', 'IdsTotal', 'IdsTotal'], 'total' => array_sum(range(0, 999)), 'odd' => [1, 3, 5, 7, 9]], $answer);
+    }
+
+    public function testAResultThatCannotBeSentFailsTheRead(): void
+    {
+        $answer = $this->runScript($this->listFile(100), '
+            $results = $reader->readInParallel($index, 2, function (Generator $users, PhpJsonChunk\Partition $part): mixed {
+                return $part->number === 1 ? fn() => 1 : "fine";
+            });
+            $answer = ["results" => $results];
+        ');
+
+        self::assertIsString($answer['error'] ?? null);
+        self::assertStringContainsString('worker 1:', $answer['error']);
+        self::assertStringContainsString('Closure', $answer['error']);
+        self::assertStringNotContainsString('worker 0', $answer['error']);
+    }
+
+    public function testAFailureInAPartReachesTheCaller(): void
+    {
+        $answer = $this->runScript($this->listFile(2000), '
+            $results = $reader->readInParallel($index, 3, function (Generator $users): int {
+                foreach ($users as $user) {
+                    if ($user["id"] === 1500) {
+                        throw new DomainException("record 1500 is broken");
+                    }
+                }
+
+                return 1;
+            });
+            $answer = ["results" => $results];
+        ');
+
+        self::assertIsString($answer['error'] ?? null);
+        self::assertStringContainsString('worker 2: DomainException: record 1500 is broken', $answer['error']);
+    }
+
+    public function testNothingToReadGivesNoResults(): void
+    {
+        $answer = $this->runScript($this->listFile(0), '
+            $answer = ["results" => $reader->readInParallel($index, 4, fn(Generator $users): int => 1)];
+        ');
+
+        self::assertSame(['results' => []], $answer);
+    }
+
+    public function testReadInParallelIsBoundedToo(): void
+    {
+        $reader = new JsonChunkReader();
+        $index = $reader->index($this->listFile(10), 'users');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('256');
+
+        $reader->readInParallel($index, 257, static fn(): int => 1);
     }
 }

@@ -42,19 +42,22 @@ final class JsonIndex
     }
 
     /**
-     * @return array<int, array{0: int, 1: int}> `[entry, byte]`: entry number `entry` starts at `byte`
+     * Kept as `[entry, byte]` pairs — thousands of them in a large index, and a pair costs less than an
+     * object — and handed out as objects.
+     *
+     * @return array<int, Checkpoint> entries ascending
      */
     public function checkpoints(): array
     {
-        return $this->checkpoints;
+        return array_map(static fn(array $pair): Checkpoint => new Checkpoint($pair[0], $pair[1]), $this->checkpoints);
     }
 
     /**
      * The last checkpoint at or before $entry.
      *
-     * @return array{0: int, 1: int}|null
+     * @return Checkpoint|null null when there is none — an empty container
      */
-    public function checkpointBefore(int $entry): array|null
+    public function checkpointBefore(int $entry): Checkpoint|null
     {
         $low = 0;
         $high = count($this->checkpoints) - 1;
@@ -69,16 +72,16 @@ final class JsonIndex
             }
         }
 
-        return $found;
+        return $found === null ? null : new Checkpoint($found[0], $found[1]);
     }
 
     /**
      * The container's entries split into at most $parts runs of consecutive entries, as even as can be
      * — sizes differ by one at most — for separate workers to read side by side, each with
-     * JsonChunkReader::readFrom($index, $offset, $limit). No part is empty, so there are fewer parts
-     * than asked when there are fewer entries.
+     * JsonChunkReader::readFrom($index, $part->offset, $part->limit). No part is empty, so there are
+     * fewer parts than asked when there are fewer entries.
      *
-     * @return array<int, array{offset: int, limit: int}>
+     * @return array<int, Partition> keyed by each part's number, from 0
      *
      * @throws InvalidArgumentException
      */
@@ -93,7 +96,7 @@ final class JsonIndex
         $offset = 0;
         for ($part = 0; $part < $parts; $part++) {
             $limit = intdiv($this->count, $parts) + ($part < $this->count % $parts ? 1 : 0);
-            $partitions[] = ['offset' => $offset, 'limit' => $limit];
+            $partitions[] = new Partition($part, $offset, $limit);
             $offset += $limit;
         }
 

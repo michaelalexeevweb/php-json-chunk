@@ -10,7 +10,8 @@ require_once __DIR__ . '/../vendor/autoload.php';
 /**
  * What an index and parallel workers buy, on the same records bin/benchmark.php reads:
  * building the index, reading entry N with and without it, and one pass with 1 to 12 workers, each
- * record encoded and hashed — light work, as any real handler's is at the least.
+ * record encoded and hashed — light work, as any real handler's is at the least — handled a record at
+ * a time by forEachInParallel(), and a part at a time by readInParallel().
  *
  * Usage: php bin/benchmark-index.php [--records=5000000] [--workers=1,2,4,6,8,12]
  */
@@ -77,6 +78,25 @@ try {
                 md5((string)json_encode($item));
             });
             $time = $seconds($started);
+            printf("%-36s %10.2f s   %.1f× the plain read\n", $workers . ' worker' . ($workers === 1 ? '' : 's'), $time, $plain / $time);
+        }
+
+        echo "\nThe same with readInParallel(), each worker given its part and returning how many it read:\n";
+        foreach ($workerCounts as $workers) {
+            $started = hrtime(true);
+            $read = array_sum($reader->readInParallel($index, $workers, static function (Generator $part): int {
+                $count = 0;
+                foreach ($part as $item) {
+                    md5((string)json_encode($item));
+                    $count++;
+                }
+
+                return $count;
+            }));
+            $time = $seconds($started);
+            if ($read !== $records) {
+                throw new RuntimeException(sprintf('%d records read of %d.', $read, $records));
+            }
             printf("%-36s %10.2f s   %.1f× the plain read\n", $workers . ' worker' . ($workers === 1 ? '' : 's'), $time, $plain / $time);
         }
     }

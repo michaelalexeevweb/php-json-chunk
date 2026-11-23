@@ -201,6 +201,10 @@ It grows with the workers up to the cores and stops there. One worker is slower 
 call per record, and a fork. A handler that waits on a database or the network gains from more workers
 than cores; this one does not wait.
 
+`readInParallel()` — the handler called once a part, returning how many it read — measured in the same
+run as `forEachInParallel()` (a later one, load around five): 1.25 s against 1.31 s at four workers,
+0.86 s against 0.89 s at six, the same at eight and twelve.
+
 A run with the machine busy — a virtual machine taking two cores — gave 5.2× at six workers and *less* at
 twelve than at eight: the workers had no cores to run on. Measure on a quiet machine.
 

@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.20.0
+composer require michaelalexeevweb/php-json-chunk:^2.0.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -571,18 +571,19 @@ places.
 ### Several processes at once
 
 An index also splits the work. `partitions()` cuts the entries into runs of consecutive entries, as even
-as can be, and each is read with `readFrom()` — by any kind of worker: queue jobs, separate commands,
-cron entries.
+as can be — `Partition` objects, each with its `number`, `offset` and `limit` — and each is read with
+`readFrom()` by any kind of worker: queue jobs, separate commands, cron entries.
 
 ```php
 $path = tempnam(sys_get_temp_dir(), 'export');
 file_put_contents($path, json_encode(['users' => array_map(fn($i) => ['id' => $i], range(0, 9999))]));
 $index = $reader->index($path, 'users');
 
-foreach ($index->partitions(4) as ['offset' => $offset, 'limit' => $limit]) {
-    // hand ($offset, $limit) — and the index, saved with toJson() — to a worker, which reads:
-    $first = $reader->readFrom($index, $offset, $limit)->current();
-    echo $offset, '+', $limit, ' starts at id ', $first['id'], PHP_EOL;   // 0+2500, 2500+2500, ...
+foreach ($index->partitions(4) as $part) {
+    // hand the part — and the index, saved with toJson() — to a worker, which reads:
+    $first = $reader->readFrom($index, $part->offset, $part->limit)->current();
+    echo 'part ', $part->number, ': ', $part->offset, '+', $part->limit, ' starts at id ', $first['id'], PHP_EOL;
+    // part 0: 0+2500 starts at id 0, part 1: 2500+2500 starts at id 2500, ...
 }
 
 unlink($path);
@@ -603,8 +604,69 @@ $reader->forEachInParallel($index, 6, function (array $user, int $number): void 
 
 The handler runs in the workers: what it does must reach beyond the process — a database, a file, a
 queue — and a connection it uses is opened inside it, since one opened before the fork would be shared
-by every worker. Measured on five million records, each encoded and hashed
-(`php bin/benchmark-index.php`):
+by every worker.
+
+To put the parts back together — a total, a count, the ids that failed a check — `readInParallel()`
+hands each worker its whole part as a generator, with the `Partition` it is reading, and gives back what
+each returned, in the order of the parts:
+
+```php
+// Recipe: needs pcntl (PHP's command line on Linux or macOS) — checked for syntax by the tests, not run.
+final class Order
+{
+    public function __construct(
+        public readonly int $amount,
+        public readonly bool $paid,
+    ) {
+    }
+
+    /** @param array{amount: int, paid: bool} $row */
+    public static function fromArray(array $row): self
+    {
+        return new self($row['amount'], $row['paid']);
+    }
+}
+
+final class OrdersTotal
+{
+    /** @param list<int> $unpaid the numbers of the orders not paid yet */
+    public function __construct(
+        public readonly int $total,
+        public readonly array $unpaid,
+    ) {
+    }
+}
+
+$index = $reader->index('/data/orders.json', 'orders');
+
+$parts = $reader->readInParallel($index, 6, function (Generator $rows): OrdersTotal {
+    $total = 0;
+    $unpaid = [];
+    foreach ($rows as $number => $row) {
+        $order = Order::fromArray($row);
+        $total += $order->amount;
+        if (!$order->paid) {
+            $unpaid[] = $number;
+        }
+    }
+
+    return new OrdersTotal($total, $unpaid);
+});
+
+// array<int, OrdersTotal>, one for each part, in their order
+$total = array_sum(array_map(static fn(OrdersTotal $part): int => $part->total, $parts));
+$unpaid = array_merge(...array_map(static fn(OrdersTotal $part): array => $part->unpaid, $parts));
+```
+
+The entries arrive as `json_decode()` gives them; a DTO made of each inside the loop gives the IDE its
+properties to offer. The handler's return type is what `readInParallel()` returns a list of — the
+method is annotated `@template T`, so PHPStan knows `$parts` holds `OrdersTotal`. What a worker
+returns is sent back with `serialize()`, objects with their class — so no closures or open resources
+in it — and held in the caller's memory: return what the part adds up to, not the part itself. A worker that ends
+without finishing its part — `exit()` in the handler included — fails the read, as a thrown exception
+does.
+
+Measured on five million records, each encoded and hashed (`php bin/benchmark-index.php`):
 
 | workers | time | against a plain read |
 |---:|---:|---:|
@@ -619,7 +681,8 @@ by every worker. Measured on five million records, each encoded and hashed
 
 Twelve cores here — six performance, six efficiency — and twelve workers is where it stops getting
 faster. One worker is a little slower than a plain loop: the handler is a call per record, and the fork
-costs something; parallel pays from two. Building the index took 2.17 s, once.
+costs something; parallel pays from two. Building the index took 2.17 s, once. `readInParallel()`, the
+handler called once a part, runs as fast or a few per cent faster.
 
 At most 256 workers are forked (`JsonChunkReader::MAX_WORKERS`) — not tied to the cores, since a handler
 that waits on a database or the network gains from more workers than there are cores, but bounded, so

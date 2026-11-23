@@ -3,6 +3,20 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.0.0 — 2026-11-23
+
+### Added
+
+- **Results from the workers.** `readInParallel($index, $workers, $handler)` forks as `forEachInParallel()` does, but calls the handler once in each worker, with a generator of its part's `key => entry` and its `Partition`, and returns what each returned, keyed by part in their order — a total, a count, a list of ids, whatever the parts are put together from. Before, a handler could only reach the caller through a file, a database or a queue. Results are sent back with `serialize()`, an object with its class — a DTO of the caller's own comes back a DTO, and the method's `@template` lets PHPStan type the list from the handler's return type; a result that cannot be sent — a closure — fails the read and names the worker. The README's example makes a DTO of each entry and returns one for each part. Five million records: as fast as `forEachInParallel()`, a few per cent faster with no call per record.
+
+### Changed
+
+- **Parts and checkpoints are objects.** `JsonIndex::partitions()` returns `Partition` objects — `number`, `offset`, `limit` — instead of `['offset' => …, 'limit' => …]` arrays, and `checkpoints()` and `checkpointBefore()` return `Checkpoint` objects — `entry`, `byte` — instead of `[entry, byte]` pairs, so an IDE offers the fields. Code that unpacked the arrays reads the properties now. The index keeps the pairs inside and saves them as before: an index saved by 1.19.0 or 1.20.0 loads unchanged. `readInParallel()`'s handler gets the `Partition` it reads.
+
+### Fixed
+
+- **A worker that exits halfway is a failure.** A handler calling `exit(0)` ended its worker as a finished one would, and `forEachInParallel()` took the part as done: the entries after it were never handled and nothing was said. A worker now sends a mark when it finishes its part; one that ends without it fails the read with "ended without finishing".
+
 ## 1.20.0 — 2026-11-23
 
 ### Added
