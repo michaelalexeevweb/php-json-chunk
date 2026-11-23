@@ -111,6 +111,15 @@ final class JsonStream
     }
 
     /**
+     * The stream starts $offset bytes into the document — its source was positioned there, as an
+     * index does — so that every offset it reports is the document's own. Before anything is read.
+     */
+    public function beginAt(int $offset): void
+    {
+        $this->bytesBeforeBuffer = $offset;
+    }
+
+    /**
      * An element of $bytes was just read the slow way — it did not fit, or straddled two blocks. An
      * adaptive stream reads on in blocks that hold ELEMENTS_PER_BLOCK of it — doubling, up to
      * MAX_BLOCK_SIZE — so that elements of the kind are read fast. The block in hand is kept; the next

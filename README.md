@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.18.1
+composer require michaelalexeevweb/php-json-chunk:^1.19.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -533,6 +533,40 @@ $reader->count($source);
 ```
 
 For a file, wrap a `FileSource`: `new FileSource(new SplFileObject($path, 'rb'), $path)`.
+
+### Jumping to entry four million: an index
+
+Reading entry 4 999 000 of a 400 MB list means reading the 4 998 999 before it — 2.9 s, every time. An
+index remembers where entries start, about every thousandth, and a read from it seeks to the nearest
+one instead:
+
+```php
+$path = tempnam(sys_get_temp_dir(), 'export');
+file_put_contents($path, json_encode(['users' => array_map(fn($i) => ['id' => $i], range(0, 9999))]));
+
+$index = $reader->index($path, 'users');               // one pass, as long as reading it once
+echo $index->count(), PHP_EOL;                          // 10000
+
+foreach ($reader->readFrom($index, offset: 9_000, limit: 3) as $number => $user) {
+    echo $number, ': ', $user['id'], PHP_EOL;           // 9000, 9001, 9002 — straight there
+}
+
+file_put_contents($path . '.idx', $index->toJson());    // keep it; JsonIndex::fromJson() loads it
+unlink($path);
+unlink($path . '.idx');
+```
+
+| 5 000 000 records (404 MB) | time |
+|---|---:|
+| `getNth(4_999_000)`, no index | 2 869 ms |
+| building the index, once | 4.0 s |
+| `readFrom($index, 4_999_000, 1)` | 0.28 ms |
+
+`readFrom()` gives what `readGenerator()` with the same key path, offset and limit gives, keys included.
+The index of five million records saves as 94 KB. It is of one container — a list or an object, no
+wildcard — in a file, not a stream, since reading from it seeks; and it belongs to the file as it was:
+a file whose size or modification time has changed since is refused, rather than read at the wrong
+places.
 
 ### Block size: memory against speed
 

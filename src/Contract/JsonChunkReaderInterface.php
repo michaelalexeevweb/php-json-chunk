@@ -8,6 +8,7 @@ use Generator;
 use InvalidArgumentException;
 use Iterator;
 use PhpJsonChunk\Contract\JsonSourceInterface;
+use PhpJsonChunk\JsonIndex;
 use RuntimeException;
 
 /**
@@ -132,6 +133,28 @@ interface JsonChunkReaderInterface
      * @throws RuntimeException
      */
     public function readValues(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator;
+
+    /**
+     * Indexes the entries of one container in a file — where the first starts, then about every
+     * $every — so that readFrom() can seek to any of them.
+     *
+     * @param string|array<int, string>|null $keyPath
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function index(string|JsonSourceInterface $filePath, string|array|null $keyPath = null, int $every = 1000): JsonIndex;
+
+    /**
+     * Reads an indexed container from entry number $offset, seeking to it instead of reading every
+     * entry before it.
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator;
 
     /**
      * Several key paths, read in ONE pass over the document, yielding `path => value`.

@@ -3,6 +3,15 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.19.0 — 2026-11-23
+
+### Added
+
+- **An index for random access: `index()`, `readFrom()` and `JsonIndex`.** One pass over a container in a file remembers where its entries start — the first, then about every thousandth — and `readFrom($index, $offset, $limit)` seeks to the nearest checkpoint before the entry asked for instead of reading every entry before it. On five million records (404 MB), entry 4 999 000 takes 0.28 ms instead of 2.9 s; building the index takes 4 s, once, and it saves as 94 KB with `toJson()` and loads with `JsonIndex::fromJson()`, so one process can build it and others use it.
+  - `readFrom()` gives what `readGenerator()` with the same key path, offset and limit gives, keys included — checked at offsets on, before and after checkpoints, in compact and pretty-printed files, for lists and objects keyed by id.
+  - Checkpoints sit where the reader passes an entry's start; inside a run of entries decoded at once there is none, so they come at most a run apart from every `every` — one read covers at most about 1 040 entries.
+  - An index is of one container in a file — not a stream, which cannot seek; no wildcard path. It keeps the file's size and modification time and refuses a file that has changed since, and checks that an entry still starts at the checkpoint it seeks to.
+
 ## 1.18.1 — 2026-11-23
 
 A code review of `src`, its findings checked one by one; the four that mattered were in `readValues()`, new in 1.18.0.

@@ -468,7 +468,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    private function openFile(string|JsonSourceInterface $filePath): JsonStream
+    private function openFile(string|JsonSourceInterface $filePath, int $at = 0): JsonStream
     {
         // A source was handed over ready to read: nothing to find, nothing to open.
         if ($filePath instanceof JsonSourceInterface) {
@@ -500,8 +500,16 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new RuntimeException(sprintf('Unable to read JSON file "%s".', $filePath), 0, $exception);
         }
 
+        // An index's reader starts where an entry starts, not at the top of the file.
+        if ($at > 0 && $file->fseek($at) !== 0) {
+            throw new RuntimeException(sprintf('Unable to seek to byte %d of "%s".', $at, $filePath));
+        }
+
         // The buffer travels with the source, so nothing about this read lives on the reader.
-        return $this->newStream(new FileSource($file, $filePath));
+        $stream = $this->newStream(new FileSource($file, $filePath));
+        $stream->beginAt($at);
+
+        return $stream;
     }
 
     /**
@@ -551,15 +559,25 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @throws InvalidArgumentException
      */
-    private function streamContainer(JsonStream $stream, string $filePath, string $container): Generator
-    {
+    /**
+     * @param array<int, array{0: int, 1: int}> $checkpoints filled with `[entry, byte]` pairs — where entries
+     *        start, about every $every entries — for an index; none when $every is 0
+     */
+    private function streamContainer(
+        JsonStream $stream,
+        string $filePath,
+        string $container,
+        int $firstKey = 0,
+        array &$checkpoints = [],
+        int $every = 0,
+    ): Generator {
         if ($container === '{') {
-            yield from $this->streamObjectMembers($stream, $filePath);
+            yield from $this->streamObjectMembers($stream, $filePath, $firstKey, $checkpoints, $every);
 
             return;
         }
 
-        yield from $this->streamArrayValues($stream, $filePath);
+        yield from $this->streamArrayValues($stream, $filePath, $firstKey, $checkpoints, $every);
     }
 
     /**
@@ -574,8 +592,20 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @throws InvalidArgumentException
      */
-    private function streamObjectMembers(JsonStream $stream, string $filePath): Generator
-    {
+    /**
+     * @param int $firstKey the number of the first member read, for checkpoints: not 0 when reading
+     *        from an index's checkpoint
+     * @param array<int, array{0: int, 1: int}> $checkpoints
+     */
+    private function streamObjectMembers(
+        JsonStream $stream,
+        string $filePath,
+        int $firstKey = 0,
+        array &$checkpoints = [],
+        int $every = 0,
+    ): Generator {
+        $produced = $firstKey;
+        $nextCheckpoint = $firstKey;
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === '}') {
             return;
@@ -597,9 +627,16 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 );
             }
 
+            // Where this member starts, for an index: its key's opening quote.
+            if ($every > 0 && $produced >= $nextCheckpoint) {
+                $checkpoints[] = [$produced, $stream->offset() - 1];
+                $nextCheckpoint = $produced + $every;
+            }
+
             $members = $this->decodeMemberRunFast($stream);
             if ($members !== null) {
                 foreach ($members as $memberKey => $memberValue) {
+                    $produced++;
                     yield (string)$memberKey => $memberValue;
                 }
 
@@ -635,14 +672,22 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $valueOffset = $stream->offset() - 1;
             if ($this->decodeContainerFast($stream, $valueFirst, $value)) {
+                $produced++;
                 yield (string)$key => $value;
             } else {
                 $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
                 try {
-                    yield (string)$key => json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
+                    $value = json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
                     $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
+                    $value = null;
+                    $key = null;
+                }
+
+                if ($key !== null) {
+                    $produced++;
+                    yield (string)$key => $value;
                 }
             }
 
@@ -735,8 +780,20 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @throws InvalidArgumentException
      */
-    private function streamArrayValues(JsonStream $stream, string $filePath): Generator
-    {
+    /**
+     * @param int $firstKey the key of the first element read: not 0 when reading from an index's
+     *        checkpoint, so that the keys are the elements' numbers in the list
+     * @param array<int, array{0: int, 1: int}> $checkpoints
+     */
+    private function streamArrayValues(
+        JsonStream $stream,
+        string $filePath,
+        int $firstKey = 0,
+        array &$checkpoints = [],
+        int $every = 0,
+    ): Generator {
+        $produced = $firstKey;
+        $nextCheckpoint = $firstKey;
         $next = $this->readNonWhitespaceChar($stream);
         if ($next === ']') {
             return;
@@ -749,7 +806,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $stream->pushBack($next);
-        $index = 0;
+        $index = $firstKey;
 
         while (true) {
             $valueFirst = $this->readNonWhitespaceChar($stream);
@@ -764,24 +821,36 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // it, the stream has already run past its end.
             $valueOffset = $stream->offset() - 1;
 
+            // Where this element starts, for an index — at the first element, then about every $every.
+            if ($every > 0 && $produced >= $nextCheckpoint) {
+                $checkpoints[] = [$produced, $valueOffset];
+                $nextCheckpoint = $produced + $every;
+            }
+
             $run = $this->decodeRunFast($stream, $valueFirst);
             if ($run !== null) {
                 foreach ($run as $value) {
-                    yield $value;
+                    yield $produced++ => $value;
                 }
 
                 $index += count($run) - 1;
             } elseif ($this->decodeContainerFast($stream, $valueFirst, $value)) {
-                yield $value;
+                yield $produced++ => $value;
             } else {
                 // Hot path: use block-buffer scanners (strcspn at C level) instead of
                 // reading it a character at a time and concatenating.
                 $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
+                $refused = false;
                 try {
-                    yield json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
+                    $value = json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
                     $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
+                    $refused = true;
+                }
+
+                if (!$refused) {
+                    yield $produced++ => $value;
                 }
             }
 
@@ -4680,6 +4749,111 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $stream->fastMisses = 0;
 
         return $documents;
+    }
+
+    /**
+     * Indexes the entries of one container in a file — a list's elements or an object's members —
+     * by remembering where the first starts, then about every $every, so that readFrom() can seek to
+     * any entry. One pass over the container, as long as reading it once takes.
+     *
+     * @param string|array<int, string>|null $keyPath the container, as for readGenerator(); no wildcard
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function index(string|JsonSourceInterface $filePath, string|array|null $keyPath = null, int $every = 1000): JsonIndex
+    {
+        if (!is_string($filePath)) {
+            throw new InvalidArgumentException('Only a file can be indexed: reading from an index seeks, and a stream cannot.');
+        }
+
+        if ($keyPath !== null && $keyPath !== '' && $this->hasWildcardSegment($keyPath)) {
+            throw new InvalidArgumentException('An index is of one container; a key path with a wildcard names many.');
+        }
+
+        if ($every < 1) {
+            throw new InvalidArgumentException('every must be at least 1.');
+        }
+
+        clearstatcache(true, $filePath);
+        $size = (int)filesize($filePath);
+        $modified = (int)filemtime($filePath);
+
+        $stream = $this->openFile($filePath);
+        $checkpoints = [];
+        try {
+            $container = $this->positionStreamAtTargetArrayStart($stream, $keyPath);
+            $count = iterator_count($this->streamContainer($stream, $filePath, $container, 0, $checkpoints, $every));
+            $this->assertNothingFollowsRootArray($stream, $filePath, $keyPath);
+        } finally {
+            $stream->close();
+        }
+
+        return new JsonIndex($filePath, $keyPath, $container, $count, $checkpoints, $size, $modified);
+    }
+
+    /**
+     * Reads the indexed container from entry number $offset, seeking to the nearest checkpoint before
+     * it instead of reading every entry from the start: what readGenerator() with the same key path,
+     * offset and limit gives, keys included, at the cost of at most one checkpoint's stretch.
+     *
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator
+    {
+        $this->assertLimitAndOffset($limit, $offset);
+
+        clearstatcache(true, $index->path);
+        if (!is_file($index->path) || filesize($index->path) !== $index->size || filemtime($index->path) !== $index->modified) {
+            throw new RuntimeException(sprintf(
+                'File "%s" has changed since it was indexed, or is gone; index it again.',
+                $index->path,
+            ));
+        }
+
+        return $this->readIndexed($index, $offset, $limit);
+    }
+
+    /**
+     * @return Generator<int|string, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function readIndexed(JsonIndex $index, int $offset, int|null $limit): Generator
+    {
+        $checkpoint = $index->checkpointBefore($offset);
+        if ($checkpoint === null || $offset >= $index->count()) {
+            return;
+        }
+
+        [$entry, $byte] = $checkpoint;
+        $stream = $this->openFile($index->path, $byte);
+        try {
+            // The checkpoint must still be where an entry starts — a cheap guard against an index
+            // that does not belong to this file, whatever its size and time say.
+            $first = $this->readNonWhitespaceChar($stream);
+            if ($first === null || ($index->container === '{' && $first !== '"') || ($index->container === '[' && strpbrk($first, '{["-0123456789tfn') === false)) {
+                throw new RuntimeException(sprintf('The index does not match "%s": no entry starts at byte %d.', $index->path, $byte));
+            }
+
+            $stream->pushBack($first);
+            $readToTheEnd = true;
+
+            yield from $this->applyWindow(
+                values: $this->streamContainer($stream, $index->path, $index->container, $entry),
+                chunkSize: null,
+                limit: $limit,
+                offset: $offset - $entry,
+                readToTheEnd: $readToTheEnd,
+                preserveKeys: $index->container === '{',
+            );
+        } finally {
+            $stream->close();
+        }
     }
 
     /**
