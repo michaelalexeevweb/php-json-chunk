@@ -3,6 +3,14 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.3.0 — 2026-11-23
+
+### Added
+
+- **NDJSON indexed by several processes.** `indexValues($path, workers: 8)` cuts a file of one document to a line into stretches at newlines, one for each worker; each counts its lines and notes where every `every`-th starts, and the counts are added up. Five million lines, 404 MB: 2.65 s in one process, 0.71 s with 4 workers, 0.37 s with 12. Every line is checked to be a whole document — with `json_validate()`, without decoding, where PHP has it — since a pretty-printed document has newlines inside and a line of it, `  1` of a list, can pass for a document of its own; a file with one line that is not, or with anything the one pass would refuse or hand over, is indexed in one pass after all, so the index, or the refusal, is the same as without workers. Files under 1 MB are indexed in one pass. Tested against the one-pass index on strict NDJSON with CRLF and blank lines, and on nine kinds of file it must fall back on; five mutants of the checks, all caught.
+
+- **`Workers::Auto`: as many workers as there are cores.** `forEachInParallel()`, `readInParallel()` and `indexValues()` take it in place of a number. On Linux it is the fewest of the processors, the ones the process's cgroup lets it run on, and the cgroup's CPU quota rounded up — a container started with `--cpus=2` gets 2, where `nproc` there says the host's 12; with `--cpuset-cpus=0-2`, 3 — and on macOS what `sysctl hw.logicalcpu` says; 1 when it cannot be told. `Workers::cores()` says what it found. Asked for, never the default: reading and indexing stop getting faster at the cores, but a handler waiting on a database or the network gains from more, and each worker holds its own memory and connections. The reading of cgroup v1 and v2 files is tested on fourteen systems, from none to a quota narrower than the cpuset.
+
 ## 2.2.0 — 2026-11-23
 
 ### Added

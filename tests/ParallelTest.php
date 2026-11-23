@@ -525,6 +525,108 @@ file_put_contents(' . var_export($this->directory . '/answer.json', true) . ', j
         self::assertSame(['read' => 990, 'refused' => range(7, 907, 100), 'inTheCaller' => []], $answer);
     }
 
+    /**
+     * An NDJSON file indexed by several workers, each a stretch cut at a newline, gives the index one
+     * pass gives: the same count, and reads from it the same documents. Checkpoints fall where the
+     * stretches begin, so some are not at a multiple of $every — which shows the workers did it.
+     */
+    public function testNdjsonIndexedByWorkersReadsAsIndexedInOnePass(): void
+    {
+        $lines = $this->directory . '/many.ndjson';
+        file_put_contents($lines, implode('', array_map(static fn(int $i): string => (string)json_encode(['id' => $i, 's' => '}{' . str_repeat('x', $i % 90)]) . ($i % 7 === 0 ? "\r\n" : "\n") . ($i % 500 === 0 ? "\n" : ''), range(0, 39_999))));
+        self::assertGreaterThan(1_048_576, filesize($lines));
+
+        $answer = $this->runScript($this->listFile(1), '
+            $path = ' . var_export($lines, true) . ';
+            $one = $reader->indexValues($path, every: 1000);
+            $many = $reader->indexValues($path, every: 1000, workers: 4);
+            $same = true;
+            foreach ([0, 1, 999, 1000, 12_345, 20_000, 39_998, 39_999] as $offset) {
+                $same = $same && iterator_to_array($reader->readFrom($one, $offset, 50)) === iterator_to_array($reader->readFrom($many, $offset, 50));
+            }
+            $answer = [
+                "count" => [$one->count(), $many->count()],
+                "same" => $same,
+                "offEvery" => count(array_filter($many->checkpoints(), static fn($c): bool => $c->entry % 1000 !== 0)),
+                "every" => $many->every,
+            ];
+        ');
+
+        self::assertSame([40_000, 40_000], $answer['count']);
+        self::assertTrue($answer['same']);
+        self::assertGreaterThan(0, $answer['offEvery']);
+        self::assertSame(1000, $answer['every']);
+    }
+
+    /**
+     * A file the workers cannot cut at any newline — a pretty-printed list whose lines are documents
+     * on their own, `  1,` and `  2` — or one with something wrong with it, is indexed in one pass
+     * after all: the same index, or the same refusal.
+     *
+     * @return iterable<string, array{0: callable(int): string, 1: string}>
+     */
+    public static function notStrictlyLines(): iterable
+    {
+        yield 'pretty-printed lists of numbers' => [static fn(int $i): string => "[\n  " . $i . ",\n  2\n]\n", ''];
+        yield 'pretty-printed objects' => [static fn(int $i): string => (string)json_encode(['id' => $i, 'tags' => [1, 2]], JSON_PRETTY_PRINT) . "\n", ''];
+        yield 'a broken line, handed over' => [static fn(int $i): string => ($i === 50_000 ? '{"id":01}' : '{"id":' . $i . '}') . "\n", 'handler'];
+        yield 'a broken line, refused' => [static fn(int $i): string => ($i === 20_000 ? '{"id":01}' : '{"id":' . $i . '}') . "\n", ''];
+        yield 'two documents on a line' => [static fn(int $i): string => '{"id":' . $i . '}' . ($i === 20_000 ? '{"id":0}' : '') . "\n", ''];
+        yield 'record separators' => [static fn(int $i): string => "\x1E" . '{"id":' . $i . '}' . "\n", ''];
+        yield 'a last line cut off' => [static fn(int $i): string => $i === 99_999 ? '{"id":99999,"s":"ha' : '{"id":' . $i . ',"pad":"' . str_repeat('p', 10) . '"}' . "\n", ''];
+        yield 'a line over maxElementBytes' => [static fn(int $i): string => '{"id":' . $i . ',"s":"' . ($i === 50_000 ? str_repeat('x', 100) : '') . '"}' . "\n", 'limit'];
+        yield 'a byte-order mark' => [static fn(int $i): string => ($i === 0 ? "\xEF\xBB\xBF" : '') . '{"id":' . $i . '}' . "\n", ''];
+    }
+
+    /**
+     * @param callable(int): string $line
+     */
+    #[DataProvider('notStrictlyLines')]
+    public function testAFileNotStrictlyOneDocumentToALineIsIndexedInOnePass(callable $line, string $handler): void
+    {
+        $path = $this->directory . '/mixed.ndjson';
+        $handle = fopen($path, 'wb');
+        self::assertIsResource($handle);
+        for ($i = 0; $i < 100_000; $i++) {
+            fwrite($handle, $line($i));
+        }
+        fclose($handle);
+        self::assertGreaterThan(1_048_576, filesize($path));
+
+        $answer = $this->runScript($this->listFile(1), '
+            $path = ' . var_export($path, true) . ';
+            $refused = [];
+            $reader = new PhpJsonChunk\JsonChunkReader(onInvalidItem: ' . ($handler === 'handler' ? 'function ($item) use (&$refused) { $refused[] = $item->key; }' : 'null') . ', maxElementBytes: ' . ($handler === 'limit' ? '64' : 'null') . ');
+            $index = static function (int $workers) use ($reader, $path, &$refused): array {
+                $refused = [];
+                try {
+                    $built = $reader->indexValues($path, every: 1000, workers: $workers);
+
+                    return ["count" => $built->count(), "checkpoints" => array_map(static fn($c): array => [$c->entry, $c->byte], $built->checkpoints()), "refused" => $refused];
+                } catch (Throwable $exception) {
+                    return ["error" => get_class($exception) . ": " . $exception->getMessage()];
+                }
+            };
+            $answer = ["one" => $index(1), "many" => $index(4)];
+        ');
+
+        self::assertSame($answer['one'], $answer['many']);
+    }
+
+    /**
+     * Workers::Auto forks as many workers as there are cores, and the parts cover the entries.
+     */
+    public function testAutoForksOneWorkerForEachCore(): void
+    {
+        $answer = $this->runScript($this->listFile(5000), '
+            $parts = $reader->readInParallel($index, PhpJsonChunk\Workers::Auto, fn(Generator $users): int => iterator_count($users));
+            $answer = ["parts" => count($parts), "read" => array_sum($parts), "cores" => PhpJsonChunk\Workers::cores()];
+        ');
+
+        self::assertSame(min($answer['cores'], 5000), $answer['parts']);
+        self::assertSame(5000, $answer['read']);
+    }
+
     public function testAResultThatCannotBeSentFailsTheRead(): void
     {
         $answer = $this->runScript($this->listFile(100), '

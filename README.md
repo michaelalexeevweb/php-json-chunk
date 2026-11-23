@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.2.0
+composer require michaelalexeevweb/php-json-chunk:^2.3.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -730,6 +730,23 @@ Twelve cores here — six performance, six efficiency — and twelve workers is 
 faster. One worker is a little slower than a plain loop: the handler is a call per record, and the fork
 costs something; parallel pays from two. Building the index took 2.17 s, once. `readInParallel()`, the
 handler called once a part, runs as fast or a few per cent faster.
+
+`Workers::Auto` in place of a number forks as many workers as this process has cores: on Linux the
+fewest of the processors, the ones its cgroup lets it run on, and its cgroup's CPU quota — a container
+limited to two CPUs gets two, where `nproc` there still says the host's twelve — and on macOS what
+`sysctl` says; one when it cannot be told. `Workers::cores()` says what it found. It is asked for,
+never the default: reading and indexing stop getting faster at the cores, but a handler that waits on a
+database or the network gains from more, and every worker holds its own memory and connections.
+
+```php
+// Recipe: needs pcntl (PHP's command line on Linux or macOS) — checked for syntax by the tests, not run.
+use PhpJsonChunk\Workers;
+
+$index = $reader->indexValues('/data/events.ndjson', workers: Workers::Auto);
+$reader->forEachInParallel($index, Workers::Auto, function (array $event): void {
+    // ...
+});
+```
 
 At most 256 workers are forked (`JsonChunkReader::MAX_WORKERS`) — not tied to the cores, since a handler
 that waits on a database or the network gains from more workers than there are cores, but bounded, so
@@ -1306,6 +1323,23 @@ echo $reader->count($index), PHP_EOL;                    // 1001
 
 unlink($path);
 ```
+
+Strict NDJSON — one document to every line — can also be indexed by several processes, each a stretch
+of the file cut at a newline: `indexValues($path, workers: 8)`. Five million lines (404 MB):
+
+| workers | building the index |
+|---:|---:|
+| 1 | 2.65 s |
+| 2 | 1.38 s |
+| 4 | 0.71 s |
+| 8 | 0.44 s |
+| 12 | 0.37 s |
+
+Every line is checked to be a whole document, since a pretty-printed one has newlines inside and a
+line of it can pass for a document of its own; a file with one line that is not — or a broken line, a
+line over `maxElementBytes`, a byte-order mark, a last line cut off — is indexed in one pass after all,
+which gives the same index, or the same refusal, as without workers. Files under 1 MB are always indexed
+in one pass. Needs pcntl, as the parallel reads do.
 
 It is refused for a file changed rather than appended to — shorter than it was, or its last 4 KB before
 the old end no longer what they were, as after a rotation — and for an index of a list or an object,

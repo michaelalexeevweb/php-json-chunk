@@ -10,6 +10,7 @@ use Iterator;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\JsonIndex;
 use PhpJsonChunk\Partition;
+use PhpJsonChunk\Workers;
 use RuntimeException;
 
 /**
@@ -153,7 +154,7 @@ interface JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000): JsonIndex;
+    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000, int|Workers $workers = 1): JsonIndex;
 
     /**
      * Reads an indexed container from entry number $offset, seeking to it instead of reading every
@@ -184,7 +185,7 @@ interface JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void;
+    public function forEachInParallel(JsonIndex $index, int|Workers $workers, callable $handler): void;
 
     /**
      * Reads an indexed container with $workers processes forked side by side, $handler called once in
@@ -199,7 +200,7 @@ interface JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function readInParallel(JsonIndex $index, int $workers, callable $handler): array;
+    public function readInParallel(JsonIndex $index, int|Workers $workers, callable $handler): array;
 
     /**
      * Several key paths, read in ONE pass over the document, yielding `path => value`.

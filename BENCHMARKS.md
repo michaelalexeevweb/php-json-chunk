@@ -229,6 +229,20 @@ with it, the handler called once instead of once a record.
 Fewer checkpoints than the list's: lines are taken up to 64 KB at a time, and a checkpoint can only fall
 where a batch starts — about every 1 500 lines here, not every 1 000.
 
+### Building an NDJSON index with workers
+
+2.3.0's `indexValues($path, workers: N)`, the same five million lines (404 MB), best of two, load
+around five:
+
+| workers | building the index | against one process |
+|---:|---:|---:|
+| 1 | 2.65 s | |
+| 2 | 1.38 s | 1.9× |
+| 4 | 0.71 s | 3.7× |
+| 6 | 0.48 s | 5.5× |
+| 8 | 0.44 s | 6.0× |
+| 12 | 0.37 s | 7.2× |
+
 ### `readValues()`: one to a line, and pretty-printed
 
 ```bash

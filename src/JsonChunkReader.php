@@ -119,6 +119,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     /** How far decodeLinesFast() takes lines at once: as much as it holds decoded is bounded by it. */
     private const LINES_BYTES = 65536;
 
+    /** Below this a file is indexed in one process whatever the workers: forking costs more. */
+    private const PARALLEL_INDEX_BYTES = 1_048_576;
+
     /** How many of a file's last bytes an index keeps a digest of, for extendIndex(). */
     private const TAIL_BYTES = 4096;
 
@@ -5094,7 +5097,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000): JsonIndex
+    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000, int|Workers $workers = 1): JsonIndex
     {
         if (!is_string($filePath)) {
             throw new InvalidArgumentException('Only a file can be indexed: reading from an index seeks, and a stream cannot.');
@@ -5104,10 +5107,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new InvalidArgumentException('every must be at least 1.');
         }
 
+        $workers = $this->resolveWorkers($workers, 'indexValues');
+
         $filePath = realpath($filePath) ?: $filePath;
         clearstatcache(true, $filePath);
         $size = (int)filesize($filePath);
         $modified = (int)filemtime($filePath);
+
+        if ($workers > 1 && $size >= self::PARALLEL_INDEX_BYTES) {
+            $parallel = $this->indexLinesInParallel($filePath, $size, $every, $workers);
+            if ($parallel !== null) {
+                [$count, $checkpoints] = $parallel;
+
+                return new JsonIndex($filePath, null, JsonIndex::VALUES, $count, $checkpoints, $size, $modified, $this->tailDigest($filePath, $size), $every);
+            }
+        }
 
         $checkpoints = [];
         $documents = $this->streamValues($filePath, null, 0, $checkpoints, $every, stopAtCutOff: true);
@@ -5176,6 +5190,144 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return new JsonIndex($index->path, null, JsonIndex::VALUES, $documents->getReturn(), $checkpoints, $size, $modified, $this->tailDigest($index->path, $size), $index->every);
+    }
+
+    /**
+     * NDJSON indexed by $workers processes, each a stretch of the file cut at a newline: it counts the
+     * lines of its stretch and notes where every $every-th starts, and the counts are added up. Null
+     * when the file is not strictly one document to a line — a line that is not a whole document, a
+     * broken one, one over maxElementBytes, a byte-order mark, a last line cut off — and then the file
+     * is indexed the usual way, in one pass, which says what is wrong with it as it always has.
+     *
+     * Only one document to a line can be cut anywhere at a newline: a pretty-printed document has
+     * newlines inside, and a line of it can be a document on its own — `  1` of a list — so a stretch
+     * starting there would count what is not there. Every line is checked to be a whole document, and
+     * one that is not gives the whole index to the single pass.
+     *
+     * @return array{0: int, 1: array<int, array{0: int, 1: int}>}|null
+     *
+     * @throws RuntimeException
+     */
+    private function indexLinesInParallel(string $path, int $size, int $every, int $workers): array|null
+    {
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+
+        // Each stretch starts after a newline: the first one at or past its share of the bytes.
+        $starts = [0];
+        try {
+            for ($worker = 1; $worker < $workers; $worker++) {
+                fseek($handle, intdiv($size * $worker, $workers));
+                $skipped = stream_get_line($handle, $size, "\n");
+                $start = ftell($handle);
+                if ($skipped !== false && $start !== false && $start < $size && $start > $starts[count($starts) - 1]) {
+                    $starts[] = $start;
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        $tasks = [];
+        foreach ($starts as $part => $start) {
+            $end = $starts[$part + 1] ?? $size;
+            $tasks[$part] = fn(): array|null => $this->countLines($path, $start, $end, $every);
+        }
+
+        $total = 0;
+        $checkpoints = [];
+        /** @var array<int, array{0: int, 1: array<int, array{0: int, 1: int}>}|null> $stretches */
+        $stretches = $this->forkTasks($tasks, true);
+        foreach ($stretches as $stretch) {
+            if ($stretch === null) {
+                return null;
+            }
+
+            foreach ($stretch[1] as [$entry, $byte]) {
+                $checkpoints[] = [$total + $entry, $byte];
+            }
+            $total += $stretch[0];
+        }
+
+        return [$total, $checkpoints];
+    }
+
+    /**
+     * The lines of one stretch of a file — from $start, just after a newline, to $end — counted, each
+     * checked to be a whole document, with where every $every-th starts. Null at the first line that
+     * is not a whole document. json_validate() checks a line without decoding it, where PHP has it.
+     *
+     * @return array{0: int, 1: array<int, array{0: int, 1: int}>}|null
+     */
+    private function countLines(string $path, int $start, int $end, int $every): array|null
+    {
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+
+        $validate = function_exists('json_validate');
+        $limit = $this->maxElementBytes;
+        $count = 0;
+        $checkpoints = [];
+        $at = $start;
+        $carry = '';
+        try {
+            fseek($handle, $start);
+            while ($at < $end) {
+                $block = fread($handle, max(1, min(self::LINES_BYTES * 16, $end - $at)));
+                if ($block === false || $block === '') {
+                    return null;
+                }
+
+                $text = $carry . $block;
+                $base = $at - strlen($carry);
+                $at += strlen($block);
+                $last = strrpos($text, "\n");
+                // The last stretch may end without a newline: its last line is a line all the same.
+                $whole = $at >= $end ? $text : ($last === false ? '' : substr($text, 0, $last + 1));
+                $carry = substr($text, strlen($whole));
+                if ($whole === '') {
+                    continue;
+                }
+
+                $lines = explode("\n", $whole);
+                if ($at < $end || str_ends_with($whole, "\n")) {
+                    array_pop($lines);
+                }
+
+                $offset = $base;
+                foreach ($lines as $line) {
+                    $lineStart = $offset;
+                    $offset += strlen($line) + 1;
+                    if (strspn($line, " \t\r") === strlen($line)) {
+                        continue;
+                    }
+
+                    if ($limit !== null && strlen($line) > $limit) {
+                        return null;
+                    }
+
+                    $valid = $validate
+                        ? json_validate($line)
+                        : (json_decode($line, false, 512) !== null || json_last_error() === JSON_ERROR_NONE);
+                    if (!$valid) {
+                        return null;
+                    }
+
+                    if ($count % $every === 0) {
+                        $checkpoints[] = [$count, $lineStart];
+                    }
+                    $count++;
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        return [$count, $checkpoints];
     }
 
     /**
@@ -5326,7 +5478,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function forEachInParallel(JsonIndex $index, int $workers, callable $handler): void
+    public function forEachInParallel(JsonIndex $index, int|Workers $workers, callable $handler): void
     {
         $this->runInParallel($index, $workers, 'forEachInParallel', static function (Generator $entries) use ($handler): void {
             foreach ($entries as $key => $item) {
@@ -5354,7 +5506,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    public function readInParallel(JsonIndex $index, int $workers, callable $handler): array
+    public function readInParallel(JsonIndex $index, int|Workers $workers, callable $handler): array
     {
         return $this->runInParallel($index, $workers, 'readInParallel', $handler, true);
     }
@@ -5370,8 +5522,33 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    private function runInParallel(JsonIndex $index, int $workers, string $method, callable $work, bool $send): array
+    private function runInParallel(JsonIndex $index, int|Workers $workers, string $method, callable $work, bool $send): array
     {
+        $workers = $this->resolveWorkers($workers, $method);
+
+        // Checked once here, before anything is forked: a changed file is refused by every worker anyway.
+        $this->readFrom($index, 0, 1);
+
+        $tasks = [];
+        foreach ($index->partitions($workers) as $partition) {
+            $tasks[$partition->number] = fn(): mixed => $work($this->readFrom($index, $partition->offset, $partition->limit), $partition);
+        }
+
+        return $this->forkTasks($tasks, $send);
+    }
+
+    /**
+     * The number of workers asked for — Workers::Auto as many as there are cores — checked.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function resolveWorkers(int|Workers $workers, string $method): int
+    {
+        if ($workers === Workers::Auto) {
+            $workers = Workers::cores();
+        }
+
         if ($workers < 1) {
             throw new InvalidArgumentException('At least one worker is needed.');
         }
@@ -5384,19 +5561,30 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             ));
         }
 
-        if (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid')) {
+        if ($workers > 1 && (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid'))) {
             throw new RuntimeException(
-                $method . '() needs pcntl, which PHP has on the command line on Linux and macOS. '
+                $method . '() needs pcntl for more than one worker, which PHP has on the command line on Linux and macOS. '
                 . 'Split the work with JsonIndex::partitions() and give the parts to your own workers.',
             );
         }
 
-        // Checked once here, before anything is forked: a changed file is refused by every worker anyway.
-        $this->readFrom($index, 0, 1);
+        return $workers;
+    }
 
+    /**
+     * Forks one worker for each task and waits for all; with $send, what each task returns is sent
+     * back and collected by the task's key. Throws when any failed, with what each failed with.
+     *
+     * @param array<int, callable(): mixed> $tasks
+     *
+     * @return array<int, mixed>
+     *
+     * @throws RuntimeException
+     */
+    private function forkTasks(array $tasks, bool $send): array
+    {
         $children = [];
-        foreach ($index->partitions($workers) as $partition) {
-            $part = $partition->number;
+        foreach ($tasks as $part => $task) {
             // When a worker cannot be started, those already forked are waited for, not left running.
             $channel = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
             if ($channel === false) {
@@ -5443,7 +5631,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 $status = 0;
                 try {
-                    $result = $work($this->readFrom($index, $partition->offset, $partition->limit), $partition);
+                    $result = $task();
                     $message = self::WORKER_DONE . ($send ? serialize($result) : '');
                 } catch (Throwable $exception) {
                     $message = $exception::class . ': ' . $exception->getMessage();
