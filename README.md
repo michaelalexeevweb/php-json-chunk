@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.17.0
+composer require michaelalexeevweb/php-json-chunk:^1.18.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -996,12 +996,50 @@ Use `PhpJsonChunk` when you need to:
 - It is **not** a general-purpose JSON writer
 - It is **not** a validator you run for its own sake — it refuses malformed input as it reads
 - It is focused on **reading** large JSON documents, not on building them
-- It does **not** read NDJSON / JSON Lines — one JSON document per line — and does not need to (see below)
+- It reads a **sequence** of JSON documents only when asked to, with `readValues()` (see below): every
+  other read refuses anything after the one document, as `json_decode()` does
 
-### NDJSON needs no library
+### A sequence of documents: `readValues()`
 
-A `.ndjson` or `.jsonl` file is a JSON document per line, with no brackets around them and no commas
-between. Each line is complete on its own, so plain PHP already streams it as fast as anything can:
+Not every JSON file is one document. Logs and dumps written by appending, `jq` output, an export glued
+together with `cat`, an event stream — these are documents one after another, with nothing around them:
+
+```text
+{
+  "id": 1,
+  "event": "login"
+}
+{
+  "id": 2,
+  "event": "logout"
+}
+```
+
+As one JSON text that is invalid, and `json_decode()` and every other read here refuse it — rightly, or a
+stray `}` at the end of a file would pass. `readValues()` is the explicit way to read it, one document at a
+time, each checked as strictly as a whole file:
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+$log = new StringSource("{\n  \"id\": 1\n}\n{\n  \"id\": 2\n}\n");
+
+foreach ($reader->readValues($log) as $number => $document) {
+    echo $number, ': ', $document['id'], PHP_EOL;
+}
+```
+
+It reads documents pretty-printed one after another, one per line (JSON Lines, NDJSON), with nothing
+between them, or each after an RFC 7464 record separator; `limit`, `offset`, `onInvalidItem`,
+`maxElementBytes` and the rest apply, a document counting as an element.
+
+| 200 000 documents (20 MB) | time |
+|---|---:|
+| one per line, `fgets()` + `json_decode()` | 126 ms |
+| one per line, `readValues()` | 207 ms |
+| pretty-printed one after another, `readValues()` | 237 ms |
+
+For a file that is strictly one document per line, the plain loop is faster and needs nothing:
 
 ```php
 $handle = fopen('php://memory', 'r+b');
@@ -1017,11 +1055,10 @@ while (($line = fgets($handle)) !== false) {
 fclose($handle);
 ```
 
-Measured on 200 000 lines (20 MB): `fgets()` + `json_decode()` 118 ms at +0.03 MB, `SplFileObject` 116 ms;
-a block reader of the kind this library would add, 121–135 ms. Nearly all the time is `json_decode()`,
-in C, and so is finding the newline — there is nothing left for a library to win. Do not hand such a
-file to a reader built for ONE document: JsonMachine, given it, returned the five members of the first
-line and stopped, with no error, and the other 199 999 lines were simply not there.
+`readValues()` is for the rest: documents that span several lines, documents with nothing between them,
+or when the other options are wanted too. Do not hand such a file to a reader built for ONE document:
+JsonMachine, given 200 000 lines, returned the five members of the first line and stopped, with no
+error, and the other 199 999 lines were simply not there.
 
 ## Conformance
 

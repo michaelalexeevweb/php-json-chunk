@@ -3557,12 +3557,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
+        if ($start < $stream->noRunBefore) {
+            return null;
+        }
+
         $values = $this->decodesRun($stream, $valueFirst, $start, $associative ?? $this->associative, $raw, $maxDepth);
         if ($values !== null) {
             $stream->fastMisses = 0;
 
             return $values;
         }
+
+        // Not again over the same bytes, whatever single elements read fast in between.
+        $stream->noRunBefore = min($stream->bufLen, $start + self::RUN_BYTES);
 
         // Brackets inside strings, say, keep every cut unbalanced; each try counts over the whole run
         // again. A run of misses stops the trying until the next block — the elements are read one at
@@ -3651,12 +3658,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
+        if ($start < $stream->noRunBefore) {
+            return null;
+        }
+
         $members = $this->decodesMemberRun($stream, $start, $associative ?? $this->associative, $raw, $maxDepth);
         if ($members !== null) {
             $stream->fastMisses = 0;
 
             return $members;
         }
+
+        // Not again over the same bytes, whatever single members read fast in between.
+        $stream->noRunBefore = min($stream->bufLen, $start + self::RUN_BYTES);
 
         $stream->fastMisses++;
 
@@ -4430,6 +4444,221 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         } finally {
             $stream->close();
         }
+    }
+
+    /**
+     * A sequence of JSON documents in one file, one document at a time: pretty-printed one after
+     * another, one per line (JSON Lines, NDJSON), with nothing between them, or each after an RFC 7464
+     * record separator. Each document is checked as strictly as a whole file is; only the sequence is
+     * what readGenerator() would refuse. Keys count the documents from 0.
+     *
+     * @return Generator<int|string, mixed> keyed by the document's number, from 0
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readValues(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator
+    {
+        $this->assertLimitAndOffset($limit, $offset);
+        $readToTheEnd = true;
+
+        return $this->applyWindow(
+            values: $this->streamValues($filePath),
+            chunkSize: null,
+            limit: $limit,
+            offset: $offset,
+            readToTheEnd: $readToTheEnd,
+        );
+    }
+
+    /**
+     * @return Generator<int, mixed>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function streamValues(string|JsonSourceInterface $filePath): Generator
+    {
+        $stream = $this->openFile($filePath);
+        $sourceName = $this->describeSource($filePath);
+
+        try {
+            // Every document read, refused ones too — the number a handler is given — and the valid
+            // ones handed out, the key each comes with.
+            $index = 0;
+            $produced = 0;
+
+            while (true) {
+                $first = $this->readNonWhitespaceChar($stream);
+                while ($first === "\x1E") {
+                    $first = $this->readNonWhitespaceChar($stream);
+                }
+
+                if ($first === null) {
+                    return;
+                }
+
+                if ($index === 0) {
+                    $this->assertNoByteOrderMark($first);
+                }
+
+                $valueOffset = $stream->offset() - 1;
+
+                if ($first === '{' && ($run = $this->decodeDocumentRunFast($stream)) !== null) {
+                    foreach ($run as $document) {
+                        yield $produced++ => $document;
+                    }
+
+                    $index += count($run);
+
+                    continue;
+                }
+
+                if (($first === '{' || $first === '[') && $this->decodeDocumentFast($stream, $first, $document)) {
+                    yield $produced++ => $document;
+                    $index++;
+
+                    continue;
+                }
+
+                $raw = $this->scanValue($stream, $first, $sourceName);
+                try {
+                    $document = json_decode($raw, $this->associative, 512, $this->decodeFlags);
+                } catch (JsonException $exception) {
+                    $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $sourceName);
+                    $index++;
+
+                    continue;
+                }
+
+                yield $produced++ => $document;
+                $index++;
+            }
+        } finally {
+            $stream->close();
+        }
+    }
+
+    /**
+     * One document of a sequence, found and decoded within the block in hand. Its end is the first
+     * closing bracket where the brackets of its kind balance — counted from one to the next, in C — and
+     * json_decode() settles it, as it settles an element. False, with the stream untouched, when the
+     * document does not end within the block, or the count was thrown by a bracket inside a string.
+     */
+    private function decodeDocumentFast(JsonStream $stream, string $first, mixed &$value): bool
+    {
+        if ($stream->charBuffer !== [] || $stream->fastMisses >= 8) {
+            return false;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== $first) {
+            return false;
+        }
+
+        $close = $first === '{' ? '}' : ']';
+        $counted = $start;
+        $depth = 0;
+        $at = strpos($stream->buf, $close, $start + 1);
+
+        while ($at !== false) {
+            $span = $at + 1 - $counted;
+            $depth += substr_count($stream->buf, $first, $counted, $span) - substr_count($stream->buf, $close, $counted, $span);
+            $counted = $at + 1;
+            if ($depth < 0) {
+                break;
+            }
+
+            if ($depth === 0) {
+                $length = $at + 1 - $start;
+                if ($this->maxElementBytes !== null && $length > $this->maxElementBytes) {
+                    return false;
+                }
+
+                try {
+                    $value = json_decode(substr($stream->buf, $start, $length), $this->associative, 512, $this->decodeFlags);
+                } catch (JsonException) {
+                    break;
+                }
+
+                $stream->bufPos = $at + 1;
+                $stream->fastMisses = 0;
+
+                return true;
+            }
+
+            $at = strpos($stream->buf, $close, $at + 1);
+        }
+
+        if ($at !== false) {
+            $stream->fastMisses++;
+        }
+
+        return false;
+    }
+
+    /**
+     * Several small object documents of a sequence at once: from the one just entered to the last
+     * boundary — `}`, whitespace or a record separator, `{` — within RUN_BYTES, every boundary made a
+     * comma, decoded by ONE json_decode() in brackets. Null, with the stream untouched, when no run of
+     * two or more can be had.
+     *
+     * A boundary is only ever made a comma where it is one: the run is decoded only when every `}`…`{`
+     * in it stands outside a string — counted with the strings cut out and with them in, the two must
+     * agree — and only when it decodes into as many documents as it had boundaries plus one. A run cut
+     * inside a string never decodes.
+     *
+     * @return array<int, mixed>|null
+     */
+    private function decodeDocumentRunFast(JsonStream $stream): array|null
+    {
+        if ($stream->charBuffer !== [] || $stream->fastMisses >= 8) {
+            return null;
+        }
+
+        if ($this->maxElementBytes !== null && $this->maxElementBytes < self::RUN_BYTES) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== '{' || $start < $stream->noRunBefore) {
+            return null;
+        }
+
+        $boundary = '/\}\s*(?:\x1E\s*)?\{/';
+        $window = substr($stream->buf, $start, min($stream->bufLen, $start + self::RUN_BYTES) - $start);
+        // Whatever the outcome, these bytes are not searched for a run again.
+        $stream->noRunBefore = $start + strlen($window);
+        if (preg_match_all($boundary, $window, $found, PREG_OFFSET_CAPTURE) < 2) {
+            return null;
+        }
+
+        // The last boundary is where the run is cut: its `}` ends the run's last document.
+        $cut = (int)$found[0][count($found[0]) - 1][1];
+        $run = substr($window, 0, $cut + 1);
+        $inside = preg_match_all($boundary, $run);
+        $stripped = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '""', $run);
+        if ($inside === false || $stripped === null || preg_match_all($boundary, $stripped) !== $inside) {
+            return null;
+        }
+
+        try {
+            $documents = json_decode('[' . preg_replace($boundary, '},{', $run) . ']', $this->associative, 512, $this->decodeFlags);
+        } catch (JsonException) {
+            $stream->fastMisses++;
+
+            return null;
+        }
+
+        if (!is_array($documents) || count($documents) !== $inside + 1) {
+            return null;
+        }
+
+        $stream->bufPos = $start + $cut + 1;
+        $stream->noRunBefore = 0;
+        $stream->fastMisses = 0;
+
+        return $documents;
     }
 
     /**

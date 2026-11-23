@@ -3,6 +3,17 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.18.0 — 2026-11-23
+
+### Added
+
+- **`readValues()`** reads a sequence of JSON documents in one file, one document at a time: pretty-printed one after another, one per line (JSON Lines, NDJSON), with nothing between them, or each after an RFC 7464 record separator — log files written by appending, `jq` output, exports glued together. Each document is checked as strictly as a whole file; only the sequence is what every other read refuses, as it should, so a stray `}` after an ordinary document is still caught. `limit`, `offset`, `onInvalidItem`, `maxElementBytes`, `BlockSize` and `bigIntAsString` apply, a document counting as an element. 200 000 documents: 207 ms one per line (a plain `fgets()` loop, which reads only that shape, takes 126 ms), 237 ms pretty-printed one after another.
+  - Small documents are decoded a run at a time, every boundary between them made a comma — only where it stands outside a string, which is checked by counting the boundaries with the strings cut out and with them in, and only when the run decodes into as many documents as it had boundaries plus one. Either check alone catches a boundary inside a string; the test fails only with both removed.
+
+### Fixed
+
+- **A run that failed is not tried again over the same bytes.** Runs of elements, members or documents that could not be decoded at once used to be retried at every following entry whenever a single entry read fast in between had cleared the miss count — so a stretch where runs kept failing searched the same kilobytes again for every entry. Found while building `readValues()`, where such a stretch made the time quadratic; elsewhere it cost little, and a list built only to defeat runs now reads 15% slower, in exchange for never more than one look at any stretch.
+
 ## 1.17.0 — 2026-11-23
 
 ### Added

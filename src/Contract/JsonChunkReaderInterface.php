@@ -119,6 +119,17 @@ interface JsonChunkReaderInterface
     public function getNth(string|JsonSourceInterface $filePath, int $index, string|array|null $keyPath = null): mixed;
 
     /**
+     * Reads a sequence of JSON documents in one file — pretty-printed one after another, one per line,
+     * with nothing between them, or after RFC 7464 record separators — one document at a time.
+     *
+     * @return Generator<int|string, mixed> keyed by the document's number, from 0
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readValues(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator;
+
+    /**
      * Several key paths, read in ONE pass over the document, yielding `path => value`.
      *
      * The key is the path that matched, so a `foreach` reads as "this value, from that path".
