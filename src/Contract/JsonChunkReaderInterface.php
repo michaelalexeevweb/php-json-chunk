@@ -147,6 +147,15 @@ interface JsonChunkReaderInterface
     public function index(string|JsonSourceInterface $filePath, string|array|null $keyPath = null, int $every = 1000): JsonIndex;
 
     /**
+     * Indexes the documents of a sequence — JSON Lines, NDJSON, as readValues() reads them — for
+     * readFrom(), partitions() and the parallel reads.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000): JsonIndex;
+
+    /**
      * Reads an indexed container from entry number $offset, seeking to it instead of reading every
      * entry before it.
      *

@@ -359,6 +359,34 @@ echo json_encode($answer);
         self::assertSame(['classes' => ['IdsTotal', 'IdsTotal', 'IdsTotal'], 'total' => array_sum(range(0, 999)), 'odd' => [1, 3, 5, 7, 9]], $answer);
     }
 
+    /**
+     * An index of NDJSON lines splits as one of a list does: every line read once between the workers,
+     * keyed by its number.
+     */
+    public function testWorkersReadNdjsonLinesOnceBetweenThem(): void
+    {
+        $lines = $this->directory . '/lines.ndjson';
+        file_put_contents($lines, implode("\n", array_map(static fn(int $i): string => (string)json_encode(['id' => $i, 's' => '}{']), range(0, 4999))) . "\n");
+
+        $answer = $this->runScript($this->listFile(1), '
+            $index = $reader->indexValues(' . var_export($lines, true) . ', every: 100);
+            $parts = $reader->readInParallel($index, 4, function (Generator $lines): array {
+                $ids = [];
+                foreach ($lines as $number => $line) {
+                    if ($number !== $line["id"]) {
+                        throw new RuntimeException("key " . $number);
+                    }
+                    $ids[] = $line["id"];
+                }
+
+                return $ids;
+            });
+            $answer = ["parts" => count($parts), "ids" => array_merge(...$parts)];
+        ');
+
+        self::assertSame(['parts' => 4, 'ids' => range(0, 4999)], $answer);
+    }
+
     public function testAResultThatCannotBeSentFailsTheRead(): void
     {
         $answer = $this->runScript($this->listFile(100), '

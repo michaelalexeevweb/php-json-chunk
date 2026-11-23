@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.0.0
+composer require michaelalexeevweb/php-json-chunk:^2.1.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -1191,13 +1191,18 @@ It reads documents pretty-printed one after another, one per line (JSON Lines, N
 between them, or each after an RFC 7464 record separator; `limit`, `offset`, `onInvalidItem`,
 `maxElementBytes` and the rest apply, a document counting as an element.
 
-| 200 000 documents (20 MB) | time |
+| 200 000 documents (16 MB one to a line) | time |
 |---|---:|
-| one per line, `fgets()` + `json_decode()` | 126 ms |
-| one per line, `readValues()` | 207 ms |
-| pretty-printed one after another, `readValues()` | 237 ms |
+| one per line, `fgets()` + `json_decode()` | 84 ms |
+| one per line, `readValues()` | 100 ms |
+| pretty-printed one after another, `readValues()` | 180 ms |
 
-For a file that is strictly one document per line, the plain loop is faster and needs nothing:
+Measured with `php bin/benchmark-values.php`. Lines are taken a block at a time: split at the newlines in
+C, each decoded by itself, and taken as a document only where one starts and only when `json_decode()`
+takes the whole line — anything else is read as before. Since 2.1.0; it was 182 ms before.
+
+For a file that is strictly one document per line, the plain loop is still a little faster and needs
+nothing:
 
 ```php
 $handle = fopen('php://memory', 'r+b');
@@ -1217,6 +1222,27 @@ fclose($handle);
 or when the other options are wanted too. Do not hand such a file to a reader built for ONE document:
 JsonMachine, given 200 000 lines, returned the five members of the first line and stopped, with no
 error, and the other 199 999 lines were simply not there.
+
+`indexValues()` indexes a sequence as `index()` indexes a list, so `readFrom()` seeks to any document and
+`partitions()`, `readInParallel()` and `forEachInParallel()` split the documents between workers.
+Documents are numbered as `readValues()` numbers them — a refused one keeps its number, so the ones after
+it keep theirs:
+
+```php
+$path = tempnam(sys_get_temp_dir(), 'events');
+file_put_contents($path, implode("\n", array_map(fn($i) => json_encode(['id' => $i]), range(0, 9999))) . "\n");
+
+$index = $reader->indexValues($path);
+foreach ($reader->readFrom($index, 9998) as $number => $event) {
+    echo $number, ': ', $event['id'], PHP_EOL;   // 9998: 9998, then 9999: 9999
+}
+
+unlink($path);
+```
+
+Five million lines (404 MB): the last one in 2.69 s without the index, 0.1 ms with it; the index took
+2.58 s to build, once. Read with `readInParallel()`, 12 workers took 0.65 s against 4.44 s for a plain
+`readValues()` — 6.8×. Details in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Conformance
 

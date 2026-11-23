@@ -202,8 +202,47 @@ call per record, and a fork. A handler that waits on a database or the network g
 than cores; this one does not wait.
 
 `readInParallel()` — the handler called once a part, returning how many it read — measured in the same
-run as `forEachInParallel()` (a later one, load around five): 1.25 s against 1.31 s at four workers,
-0.86 s against 0.89 s at six, the same at eight and twelve.
+run as `forEachInParallel()` (a later one, load around five): 1.22 s against 1.30 s at four workers,
+0.83 s against 0.90 s at six, 0.61 s against 0.65 s at twelve. One worker is as fast as a plain loop
+with it, the handler called once instead of once a record.
+
+### The same records as NDJSON
+
+2.1.0's `indexValues()`, in the same run: the five million records one to a line, 404 MB.
+
+| | time |
+|---|---:|
+| building the index — 3 235 checkpoints | 2.58 s |
+| `readValues($path, 1, 4_999_999)`, no index | 2.69 s |
+| `readFrom($index, 4_999_999, 1)` | 0.0001 s |
+
+| workers, `readInParallel()` | time | against a plain read |
+|---:|---:|---:|
+| none (a plain `readValues()`) | 4.44 s | |
+| 1 | 4.87 s | 0.9× |
+| 2 | 2.50 s | 1.8× |
+| 4 | 1.28 s | 3.5× |
+| 6 | 0.88 s | 5.1× |
+| 8 | 0.74 s | 6.0× |
+| 12 | 0.65 s | 6.8× |
+
+Fewer checkpoints than the list's: lines are taken up to 64 KB at a time, and a checkpoint can only fall
+where a batch starts — about every 1 500 lines here, not every 1 000.
+
+### `readValues()`: one to a line, and pretty-printed
+
+```bash
+php bin/benchmark-values.php
+```
+
+| 200 000 documents (16 MB one to a line) | 2.0.0 | 2.1.0 |
+|---|---:|---:|
+| one per line, `fgets()` + `json_decode()` | 88 ms | 84 ms |
+| one per line, `readValues()` | 182 ms | 100 ms |
+| pretty-printed one after another, `readValues()` | 205 ms | 180 ms |
+
+2.0.0 measured from a copy of its source in the same session, load around fourteen; 2.1.0 on a quiet
+machine. Within one run the two stood at 182 and 104 ms.
 
 A run with the machine busy — a virtual machine taking two cores — gave 5.2× at six workers and *less* at
 twelve than at eight: the workers had no cores to run on. Measure on a quiet machine.

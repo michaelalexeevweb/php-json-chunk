@@ -18,6 +18,9 @@ use JsonException;
  */
 final class JsonIndex
 {
+    /** The $container of an index of a sequence of documents, from JsonChunkReader::indexValues(). */
+    public const VALUES = 'values';
+
     /**
      * @param string|array<int, string>|null $keyPath
      * @param array<int, array{0: int, 1: int}> $checkpoints `[entry, byte]` pairs, entries ascending
@@ -133,7 +136,7 @@ final class JsonIndex
         if (
             !is_array($data)
             || !is_string($data['path'] ?? null)
-            || !in_array($data['container'] ?? null, ['[', '{'], true)
+            || !in_array($data['container'] ?? null, ['[', '{', self::VALUES], true)
             || !is_int($data['count'] ?? null)
             || !is_array($data['checkpoints'] ?? null)
             || !is_int($data['size'] ?? null)

@@ -115,6 +115,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private const RUN_BYTES = 4096;
 
+    /** How far decodeLinesFast() takes lines at once: as much as it holds decoded is bounded by it. */
+    private const LINES_BYTES = 65536;
+
     /**
      * The most processes forEachInParallel() and readInParallel() fork. Not tied to the cores: a handler that waits on a
      * database or the network gains from more workers than there are cores. But each is a process, and
@@ -4552,6 +4555,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     public function readValues(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator
     {
         $this->assertLimitAndOffset($limit, $offset);
+        if ($limit === null && $offset === 0) {
+            // Nothing to cut: the documents as they come, without a generator around them that would
+            // look at each one only to hand it on.
+            return $this->streamValues($filePath);
+        }
+
         $readToTheEnd = true;
 
         return $this->applyWindow(
@@ -4564,20 +4573,32 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * @return Generator<int, mixed>
+     * The documents of a sequence from the start, or — given a stream already at a checkpoint — from
+     * document number $firstKey on. With $every, where a document starts is put in $checkpoints for
+     * an index: the first, then about every $every.
+     *
+     * @param array<int, array{0: int, 1: int}> $checkpoints
+     *
+     * @return Generator<int, mixed, mixed, int> returns how many documents there were, refused ones too
      *
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    private function streamValues(string|JsonSourceInterface $filePath): Generator
-    {
-        $stream = $this->openFile($filePath);
+    private function streamValues(
+        string|JsonSourceInterface $filePath,
+        JsonStream|null $stream = null,
+        int $firstKey = 0,
+        array &$checkpoints = [],
+        int $every = 0,
+    ): Generator {
+        $stream ??= $this->openFile($filePath);
         $sourceName = $this->describeSource($filePath);
+        $nextCheckpoint = $firstKey;
 
         try {
             // Every document read, refused ones too: the key a document comes with, and the number a
             // handler is given for one it refuses.
-            $index = 0;
+            $index = $firstKey;
 
             while (true) {
                 $first = $this->readNonWhitespaceChar($stream);
@@ -4586,7 +4607,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 }
 
                 if ($first === null) {
-                    return;
+                    return $index;
                 }
 
                 if ($index === 0) {
@@ -4594,6 +4615,21 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 }
 
                 $valueOffset = $stream->offset() - 1;
+
+                // Where this document starts, for an index. A run of documents is entered at its
+                // first, so a checkpoint lands on a run's start and may come later than $every asks.
+                if ($every > 0 && $index >= $nextCheckpoint) {
+                    $checkpoints[] = [$index, $valueOffset];
+                    $nextCheckpoint = $index + $every;
+                }
+
+                if (($lines = $this->decodeLinesFast($stream)) !== null) {
+                    foreach ($lines as $document) {
+                        yield $index++ => $document;
+                    }
+
+                    continue;
+                }
 
                 if ($first === '{' && ($run = $this->decodeDocumentRunFast($stream)) !== null) {
                     foreach ($run as $document) {
@@ -4628,6 +4664,95 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         } finally {
             $stream->close();
         }
+    }
+
+    /**
+     * Documents one to a line, as NDJSON has them: from the document just entered, every whole line in
+     * the block that json_decode() takes whole is a document, up to the first that it does not take.
+     * Null, with the stream untouched, when not even the first line is one.
+     *
+     * A line is only ever taken where a document starts — the first at the document just entered, each
+     * next one right after a line that was a whole document — so a line that decodes is that document,
+     * all of it: a pretty-printed document's first line, `{` or `[`, never decodes on its own, and two
+     * documents on one line do not decode as one. Each line is decoded by itself, never joined to the
+     * next, so no line can make up for what another lacks.
+     *
+     * @return array<int, mixed>|null
+     */
+    private function decodeLinesFast(JsonStream $stream): array|null
+    {
+        if ($stream->charBuffer !== []) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $start < ($stream->noRunBefore['lines'] ?? 0)) {
+            return null;
+        }
+
+        // The first line alone, before anything is split: a pretty-printed document's first line is
+        // `{` or `[`, and every document of such a file comes this way. Decoded without the exception,
+        // which costs more than the decode when it is thrown at every document.
+        $until = min($stream->bufLen, $start + self::LINES_BYTES);
+        $end = strpos($stream->buf, "\n", $start);
+        $limited = $this->maxElementBytes !== null && $this->maxElementBytes < self::LINES_BYTES;
+        if ($end === false || $end >= $until || ($limited && $end - $start > $this->maxElementBytes)) {
+            // Not a whole line from here within reach: not tried again before the line's end.
+            $stream->noRunBefore['lines'] = $end === false ? $stream->bufLen : $end;
+
+            return null;
+        }
+
+        $document = json_decode(substr($stream->buf, $start, $end - $start), $this->associative, 512, $this->decodeFlags & ~JSON_THROW_ON_ERROR);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // Not a document — the start of a pretty-printed one: not tried again before its end.
+            $stream->noRunBefore['lines'] = $end;
+
+            return null;
+        }
+
+        $documents = [$document];
+        $at = $end + 1;
+
+        // The lines after it that end within reach: cut at the last newline, split in C.
+        $reach = substr($stream->buf, $at, $until - $at);
+        $last = strrpos($reach, "\n");
+        if ($last === false) {
+            $stream->bufPos = $at;
+
+            return $documents;
+        }
+
+        $lines = explode("\n", substr($reach, 0, $last));
+        $taken = count($lines);
+        foreach ($lines as $number => $line) {
+            if ($limited && strlen($line) > $this->maxElementBytes) {
+                $taken = $number;
+
+                break;
+            }
+
+            try {
+                $documents[] = json_decode($line, $this->associative, 512, $this->decodeFlags);
+            } catch (JsonException) {
+                // Whitespace between documents — a blank line, a carriage return — is skipped, as the
+                // scanner skips it; anything else ends the lines taken.
+                if (strspn($line, " \t\r") !== strlen($line)) {
+                    $taken = $number;
+
+                    break;
+                }
+            }
+        }
+
+        // Every line taken: up to the last newline. Fewer: the lengths of those taken, and their newlines.
+        $at += $taken === count($lines)
+            ? $last + 1
+            : array_sum(array_map('strlen', array_slice($lines, 0, $taken))) + $taken;
+
+        $stream->bufPos = $at;
+
+        return $documents;
     }
 
     /**
@@ -4804,6 +4929,38 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * Indexes the documents of a sequence — JSON Lines, NDJSON, documents one after another or after
+     * RFC 7464 record separators, as readValues() reads them — by remembering where the first starts,
+     * then about every $every, so that readFrom() can seek to any document, and partitions(),
+     * readInParallel() and forEachInParallel() split them. Documents are numbered as readValues()
+     * numbers them. One pass, as long as reading them once takes.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function indexValues(string|JsonSourceInterface $filePath, int $every = 1000): JsonIndex
+    {
+        if (!is_string($filePath)) {
+            throw new InvalidArgumentException('Only a file can be indexed: reading from an index seeks, and a stream cannot.');
+        }
+
+        if ($every < 1) {
+            throw new InvalidArgumentException('every must be at least 1.');
+        }
+
+        clearstatcache(true, $filePath);
+        $size = (int)filesize($filePath);
+        $modified = (int)filemtime($filePath);
+
+        $checkpoints = [];
+        $documents = $this->streamValues($filePath, null, 0, $checkpoints, $every);
+        foreach ($documents as $ignored) {
+        }
+
+        return new JsonIndex($filePath, null, JsonIndex::VALUES, $documents->getReturn(), $checkpoints, $size, $modified);
+    }
+
+    /**
      * Reads the indexed container from entry number $offset, seeking to the nearest checkpoint before
      * it instead of reading every entry from the start: what readGenerator() with the same key path,
      * offset and limit gives, keys included, at the cost of at most one checkpoint's stretch.
@@ -4848,11 +5005,30 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             // The checkpoint must still be where an entry starts — a cheap guard against an index
             // that does not belong to this file, whatever its size and time say.
             $first = $this->readNonWhitespaceChar($stream);
-            if ($first === null || ($index->container === '{' && $first !== '"') || ($index->container === '[' && strpbrk($first, '{["-0123456789tfn') === false)) {
+            $startsAValue = strpbrk($first ?? '', '{["-0123456789tfn') !== false;
+            if ($first === null || ($index->container === '{' ? $first !== '"' : !$startsAValue)) {
                 throw new RuntimeException(sprintf('The index does not match "%s": no entry starts at byte %d.', $index->path, $byte));
             }
 
             $stream->pushBack($first);
+
+            if ($index->container === JsonIndex::VALUES) {
+                // Documents are numbered as readValues() numbers them, refused ones too, so the window
+                // is of document numbers: a refused one inside it is a document fewer, not one more.
+                $end = $limit === null ? null : $offset + $limit;
+                foreach ($this->streamValues($index->path, $stream, $entry) as $number => $document) {
+                    if ($end !== null && $number >= $end) {
+                        return;
+                    }
+
+                    if ($number >= $offset) {
+                        yield $number => $document;
+                    }
+                }
+
+                return;
+            }
+
             $readToTheEnd = true;
 
             yield from $this->applyWindow(

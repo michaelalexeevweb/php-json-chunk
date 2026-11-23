@@ -3,6 +3,18 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.1.0 — 2026-11-23
+
+### Performance
+
+- **NDJSON read 1.75× faster.** `readValues()` takes documents one to a line a block at a time: the lines that end within 64 KB split at the newlines in C, each decoded by itself — never joined, so no line can make up for what another lacks — and taken only where a document starts and only when `json_decode()` takes the whole line. A line that is not a whole document — a pretty-printed one's `{`, two documents on one line, a broken one — goes the old way, with the old message at the old byte. 200 000 lines: 182 ms → 104 ms, against 88 ms for `fgets()` + `json_decode()`; pretty-printed documents 205 ms → 186 ms. `bin/benchmark-values.php` measures it.
+  - The messages, bytes and numbers of broken lines were taken from 2.0.0 and pinned by tests; thousands of random documents of every kind with every separator read back as written, in blocks of three sizes.
+  - Found while measuring: the first version split the whole block before trying the first line, which a pretty-printed file paid for at every document. The first line is now tried alone, without an exception.
+
+### Added
+
+- **An index of NDJSON.** `indexValues($path, $every = 1000)` indexes a sequence of documents — JSON Lines, NDJSON, documents pretty-printed one after another or after record separators, as `readValues()` reads them — so that `readFrom()` seeks to any document and `partitions()`, `readInParallel()` and `forEachInParallel()` split them between workers. Documents are numbered as `readValues()` numbers them, a refused one included, and `readFrom()`'s offset and limit count documents by those numbers. A saved index records its kind as `JsonIndex::VALUES`. Five million lines, 404 MB: the last one in 2.69 s without the index, 0.1 ms with it, the index built in 2.58 s; `readInParallel()` with 12 workers 0.65 s against 4.44 s for a plain `readValues()`. Tested against `readValues()` at every offset near a checkpoint, for lines, mixed and pretty-printed documents, record separators, documents with nothing between them and documents larger than a block; and forked, every line read once between four workers.
+
 ## 2.0.0 — 2026-11-23
 
 ### Added
