@@ -24,6 +24,9 @@ final class JsonIndex
     /**
      * @param string|array<int, string>|null $keyPath
      * @param array<int, array{0: int, 1: int}> $checkpoints `[entry, byte]` pairs, entries ascending
+     * @param string|null $tail a digest of the last bytes before $size, for extendIndex() to tell a
+     *                          file only appended to from one changed; null in an index saved before 2.2.0
+     * @param int|null $every how far apart the checkpoints were asked to be, for extendIndex() to go on
      */
     public function __construct(
         public readonly string $path,
@@ -33,6 +36,8 @@ final class JsonIndex
         private readonly array $checkpoints,
         public readonly int $size,
         public readonly int $modified,
+        public readonly string|null $tail = null,
+        public readonly int|null $every = null,
     ) {
         // Looked up by binary search, which takes them to ascend; one out of place would land a read at
         // another entry's start and number every entry after it wrongly, without a word.
@@ -145,6 +150,8 @@ final class JsonIndex
             'checkpoints' => $this->checkpoints,
             'size' => $this->size,
             'modified' => $this->modified,
+            'tail' => $this->tail,
+            'every' => $this->every,
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
     }
 
@@ -184,7 +191,14 @@ final class JsonIndex
             $checkpoints[] = [$checkpoint[0], $checkpoint[1]];
         }
 
+        // Both missing from an index saved before 2.2.0.
+        $tail = $data['tail'] ?? null;
+        $every = $data['every'] ?? null;
+        if ((!is_string($tail) && $tail !== null) || (!is_int($every) && $every !== null)) {
+            throw new InvalidArgumentException('Not a saved index: tail or every is of the wrong type.');
+        }
+
         /** @var array<int, string>|string|null $keyPath */
-        return new self($data['path'], $keyPath, $data['container'], $data['count'], $checkpoints, $data['size'], $data['modified']);
+        return new self($data['path'], $keyPath, $data['container'], $data['count'], $checkpoints, $data['size'], $data['modified'], $tail, $every);
     }
 }

@@ -26,7 +26,7 @@ interface JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function count(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): int;
+    public function count(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): int;
 
     /**
      * Reads a JSON file and returns data split into chunks.
@@ -102,7 +102,7 @@ interface JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getFirst(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): mixed;
+    public function getFirst(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): mixed;
 
     /**
      * Returns the last element of the target JSON array.
@@ -112,7 +112,7 @@ interface JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getLast(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): mixed;
+    public function getLast(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): mixed;
 
     /**
      * Returns the Nth element (0-based index) of the target JSON array.
@@ -122,7 +122,7 @@ interface JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getNth(string|JsonSourceInterface $filePath, int $index, string|array|null $keyPath = null): mixed;
+    public function getNth(string|JsonSourceInterface|JsonIndex $filePath, int $index, string|array|null $keyPath = null): mixed;
 
     /**
      * Reads a sequence of JSON documents in one file — pretty-printed one after another, one per line,
@@ -165,6 +165,15 @@ interface JsonChunkReaderInterface
      * @throws RuntimeException
      */
     public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator;
+
+    /**
+     * An index of a sequence brought up to a file that has grown since, reading only what is new.
+     * Refused when the file was changed rather than appended to.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function extendIndex(JsonIndex $index): JsonIndex;
 
     /**
      * Reads an indexed container with $workers processes forked side by side, $handler called in them

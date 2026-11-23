@@ -10,6 +10,7 @@ use InvalidArgumentException;
 use Iterator;
 use JsonException;
 use PhpJsonChunk\Contract\JsonChunkReaderInterface;
+use PhpJsonChunk\Internal\CutOffException;
 use PhpJsonChunk\Internal\JsonStream;
 use RuntimeException;
 use PhpJsonChunk\Contract\JsonSourceInterface;
@@ -118,6 +119,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     /** How far decodeLinesFast() takes lines at once: as much as it holds decoded is bounded by it. */
     private const LINES_BYTES = 65536;
 
+    /** How many of a file's last bytes an index keeps a digest of, for extendIndex(). */
+    private const TAIL_BYTES = 4096;
+
     /**
      * The most processes forEachInParallel() and readInParallel() fork. Not tied to the cores: a handler that waits on a
      * database or the network gains from more workers than there are cores. But each is a process, and
@@ -135,8 +139,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function count(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): int
+    public function count(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): int
     {
+        if ($filePath instanceof JsonIndex) {
+            $this->assertNoKeyPathWithIndex($keyPath);
+            $this->assertIndexMatchesFile($filePath);
+
+            return $filePath->count();
+        }
+
         if ($keyPath !== null && $keyPath !== '' && $this->hasWildcardSegment($keyPath)) {
             return $this->countForWildcardKeyPath($filePath, $keyPath);
         }
@@ -896,7 +907,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $chunk = $stream->readBlock();
 
         if ($chunk === null) {
-            throw new InvalidArgumentException(
+            throw new CutOffException(
                 $this->invalidJsonMessage($filePath, $detail ?: 'unexpected end of input.', $stream),
             );
         }
@@ -4444,8 +4455,17 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getFirst(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): mixed
+    public function getFirst(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): mixed
     {
+        if ($filePath instanceof JsonIndex) {
+            $this->assertNoKeyPathWithIndex($keyPath);
+            foreach ($this->readFrom($filePath) as $item) {
+                return $item;
+            }
+
+            throw new RuntimeException(sprintf('Target array in "%s" is empty.', $filePath->path));
+        }
+
         foreach (
             $this->readGenerator(
                 filePath: $filePath,
@@ -4465,10 +4485,33 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getLast(string|JsonSourceInterface $filePath, string|array|null $keyPath = null): mixed
+    public function getLast(string|JsonSourceInterface|JsonIndex $filePath, string|array|null $keyPath = null): mixed
     {
         $last = null;
         $found = false;
+
+        if ($filePath instanceof JsonIndex) {
+            $this->assertNoKeyPathWithIndex($keyPath);
+            // From the last checkpoint, not from the last entry's number: in a sequence that number
+            // may be a refused document's, and the last one read is before it — before the checkpoint
+            // too, when the refused ones run from there to the end.
+            foreach (array_reverse($filePath->checkpoints()) as $checkpoint) {
+                foreach ($this->readFrom($filePath, $checkpoint->entry) as $item) {
+                    $last = $item;
+                    $found = true;
+                }
+
+                if ($found) {
+                    break;
+                }
+            }
+
+            if (!$found) {
+                throw new RuntimeException(sprintf('Target array in "%s" is empty.', $filePath->path));
+            }
+
+            return $last;
+        }
 
         foreach (
             $this->readGenerator(
@@ -4493,10 +4536,19 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *
      * @param string|array<int, string>|null $keyPath a dotted path, or its segments taken literally
      */
-    public function getNth(string|JsonSourceInterface $filePath, int $index, string|array|null $keyPath = null): mixed
+    public function getNth(string|JsonSourceInterface|JsonIndex $filePath, int $index, string|array|null $keyPath = null): mixed
     {
         if ($index < 0) {
             throw new InvalidArgumentException('Index must be greater than or equal to 0.');
+        }
+
+        if ($filePath instanceof JsonIndex) {
+            $this->assertNoKeyPathWithIndex($keyPath);
+            foreach ($this->readFrom($filePath, $index, 1) as $item) {
+                return $item;
+            }
+
+            throw new RuntimeException(sprintf('Index %d not found in target array of "%s".', $index, $filePath->path));
         }
 
         foreach (
@@ -4592,6 +4644,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * document number $firstKey on. With $every, where a document starts is put in $checkpoints for
      * an index: the first, then about every $every.
      *
+     * With $stopAtCutOff — for an index of a file that may be growing — a last document the file ends
+     * inside of is not a document yet: the count stops before it, and extendIndex() reads it once its
+     * writer has finished it. With $until, no document from that number on is read.
+     *
      * @param array<int, array{0: int, 1: int}> $checkpoints
      *
      * @return Generator<int, mixed, mixed, int> returns how many documents there were, refused ones too
@@ -4605,6 +4661,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         int $firstKey = 0,
         array &$checkpoints = [],
         int $every = 0,
+        bool $stopAtCutOff = false,
+        int|null $until = null,
     ): Generator {
         $stream ??= $this->openFile($filePath);
         $sourceName = $this->describeSource($filePath);
@@ -4616,6 +4674,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $index = $firstKey;
 
             while (true) {
+                if ($until !== null && $index >= $until) {
+                    return $index;
+                }
+
                 $first = $this->readNonWhitespaceChar($stream);
                 while ($first === "\x1E") {
                     $first = $this->readNonWhitespaceChar($stream);
@@ -4638,17 +4700,24 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                     $nextCheckpoint = $index + $every;
                 }
 
-                if (($lines = $this->decodeLinesFast($stream)) !== null) {
-                    foreach ($lines as $document) {
+                // A batch is decoded at once, and may run past $until: cut where it does.
+                // Indexing, the checkpoints due inside a batch of lines are found in it, or a block of
+                // short lines would leave a single checkpoint where $every asked for dozens.
+                $due = [];
+                if (($lines = $this->decodeLinesFast($stream, $every, $nextCheckpoint - $index, $due)) !== null
+                    || ($first === '{' && ($lines = $this->decodeDocumentRunFast($stream)) !== null)) {
+                    foreach ($due as [$within, $bytes]) {
+                        $checkpoints[] = [$index + $within, $valueOffset + $bytes];
+                        $nextCheckpoint = $index + $within + $every;
+                    }
+
+                    $past = $until !== null && $index + count($lines) > $until;
+                    foreach ($past ? array_slice($lines, 0, max(0, $until - $index)) : $lines as $document) {
                         yield $index++ => $document;
                     }
 
-                    continue;
-                }
-
-                if ($first === '{' && ($run = $this->decodeDocumentRunFast($stream)) !== null) {
-                    foreach ($run as $document) {
-                        yield $index++ => $document;
+                    if ($past) {
+                        return $index;
                     }
 
                     continue;
@@ -4662,12 +4731,26 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 // A number, true, false or null ends where the next document begins too — at a record
                 // separator, a bracket or a quote — not only at whitespace, as within a document.
-                $raw = $first === '{' || $first === '[' || $first === '"'
-                    ? $this->scanValue($stream, $first, $sourceName)
-                    : $this->scanPrimitive($stream, $first, ",]} \t\n\r\x1E[{\"");
+                try {
+                    $raw = $first === '{' || $first === '[' || $first === '"'
+                        ? $this->scanValue($stream, $first, $sourceName)
+                        : $this->scanPrimitive($stream, $first, ",]} \t\n\r\x1E[{\"");
+                } catch (CutOffException $exception) {
+                    if ($stopAtCutOff) {
+                        return $this->leaveOutCutOff($checkpoints, $index);
+                    }
+
+                    throw $exception;
+                }
+
                 try {
                     $document = json_decode($raw, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
+                    // A number or a word the file ends in may be one its writer is still writing.
+                    if ($stopAtCutOff && $first !== '{' && $first !== '[' && $first !== '"' && $this->atEnd($stream)) {
+                        return $this->leaveOutCutOff($checkpoints, $index);
+                    }
+
                     $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $sourceName, $this->beyondHandOver($stream, $index));
                     $index++;
 
@@ -4682,6 +4765,37 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
+     * A document cut off is not in the index: nor is the checkpoint made at its start, before it was
+     * known to be cut off. Returns how many documents there are.
+     *
+     * @param array<int, array{0: int, 1: int}> $checkpoints
+     */
+    private function leaveOutCutOff(array &$checkpoints, int $index): int
+    {
+        if ($checkpoints !== [] && $checkpoints[count($checkpoints) - 1][0] === $index) {
+            array_pop($checkpoints);
+        }
+
+        return $index;
+    }
+
+    /**
+     * Whether nothing but whitespace is left in the source. What it skips is whitespace, which the
+     * next read would skip too; a character found is put back.
+     */
+    private function atEnd(JsonStream $stream): bool
+    {
+        $next = $this->readNonWhitespaceChar($stream);
+        if ($next === null) {
+            return true;
+        }
+
+        $stream->pushBack($next);
+
+        return false;
+    }
+
+    /**
      * Documents one to a line, as NDJSON has them: from the document just entered, every whole line in
      * the block that json_decode() takes whole is a document, up to the first that it does not take.
      * Null, with the stream untouched, when not even the first line is one.
@@ -4692,9 +4806,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * documents on one line do not decode as one. Each line is decoded by itself, never joined to the
      * next, so no line can make up for what another lacks.
      *
+     * With $every, the documents due a checkpoint — the $firstDue-th of the batch, then every
+     * $every-th — are put in $due as `[their place in the batch, their distance in bytes from the
+     * first]`; left empty when a blank line was skipped, as the places of lines and documents part.
+     *
+     * @param array<int, array{0: int, 1: int}> $due
+     *
      * @return array<int, mixed>|null
      */
-    private function decodeLinesFast(JsonStream $stream): array|null
+    private function decodeLinesFast(JsonStream $stream, int $every = 0, int $firstDue = 0, array &$due = []): array|null
     {
         if ($stream->charBuffer !== []) {
             return null;
@@ -4739,7 +4859,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $lines = explode("\n", substr($reach, 0, $last));
-        $taken = count($lines);
+        $all = count($lines);
+        $taken = $all;
+        $skipped = false;
         foreach ($lines as $number => $line) {
             if ($limited && strlen($line) > $this->maxElementBytes) {
                 $taken = $number;
@@ -4757,11 +4879,27 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                     break;
                 }
+
+                $skipped = true;
+            }
+        }
+
+        if ($every > 0 && !$skipped && $firstDue < count($documents)) {
+            // Document $p of the batch is line $p - 1 after the first: its distance from the first is
+            // the first line, and the lines before it, each with its newline.
+            // Summed in C, a stretch between two checkpoints at a time.
+            $lengths = array_map('strlen', array_slice($lines, 0, count($documents) - 1));
+            $distance = $end + 1 - $start;
+            $counted = 1;
+            for ($place = max(1, $firstDue); $place < count($documents); $place += $every) {
+                $distance += array_sum(array_slice($lengths, $counted - 1, $place - $counted)) + $place - $counted;
+                $counted = $place;
+                $due[] = [$place, $distance];
             }
         }
 
         // Every line taken: up to the last newline. Fewer: the lengths of those taken, and their newlines.
-        $at += $taken === count($lines)
+        $at += $taken === $all
             ? $last + 1
             : array_sum(array_map('strlen', array_slice($lines, 0, $taken))) + $taken;
 
@@ -4943,7 +5081,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $stream->close();
         }
 
-        return new JsonIndex($filePath, $keyPath, $container, $count, $checkpoints, $size, $modified);
+        return new JsonIndex($filePath, $keyPath, $container, $count, $checkpoints, $size, $modified, $this->tailDigest($filePath, $size), $every);
     }
 
     /**
@@ -4972,11 +5110,96 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $modified = (int)filemtime($filePath);
 
         $checkpoints = [];
-        $documents = $this->streamValues($filePath, null, 0, $checkpoints, $every);
+        $documents = $this->streamValues($filePath, null, 0, $checkpoints, $every, stopAtCutOff: true);
         foreach ($documents as $ignored) {
         }
 
-        return new JsonIndex($filePath, null, JsonIndex::VALUES, $documents->getReturn(), $checkpoints, $size, $modified);
+        return new JsonIndex($filePath, null, JsonIndex::VALUES, $documents->getReturn(), $checkpoints, $size, $modified, $this->tailDigest($filePath, $size), $every);
+    }
+
+    /**
+     * An index of a sequence brought up to a file that has grown since — a log, an export appended to
+     * — reading only what is new: from the index's last checkpoint, so that a document cut short when
+     * the index was made is read again whole. The same index back when the file has not changed.
+     *
+     * Refused when the file was changed rather than appended to: shorter than it was, or its last
+     * bytes before the old end are no longer what they were. Only an index of a sequence can be
+     * extended — a list or an object ends with its bracket, and one that grew is another document.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function extendIndex(JsonIndex $index): JsonIndex
+    {
+        if ($index->container !== JsonIndex::VALUES) {
+            throw new InvalidArgumentException('Only an index of a sequence of documents can be extended: a list or an object ends with its bracket, and one that grew is another document. Index it again.');
+        }
+
+        clearstatcache(true, $index->path);
+        if (!is_file($index->path)) {
+            throw new RuntimeException(sprintf('File "%s" is gone.', $index->path));
+        }
+
+        $size = (int)filesize($index->path);
+        $modified = (int)filemtime($index->path);
+        if ($size === $index->size && $modified === $index->modified) {
+            return $index;
+        }
+
+        if ($index->tail === null) {
+            throw new RuntimeException('This index was saved before 2.2.0 and cannot tell an appended file from a changed one; index it again.');
+        }
+
+        if ($size < $index->size || $this->tailDigest($index->path, $index->size) !== $index->tail) {
+            throw new RuntimeException(sprintf('File "%s" was changed, not only appended to, since it was indexed; index it again.', $index->path));
+        }
+
+        $checkpoints = array_map(static fn(Checkpoint $checkpoint): array => [$checkpoint->entry, $checkpoint->byte], $index->checkpoints());
+        $last = array_pop($checkpoints);
+        if ($last === null) {
+            return $this->indexValues($index->path, $index->every ?? 1000);
+        }
+
+        [$entry, $byte] = $last;
+        $stream = $this->openFile($index->path, $byte);
+        $first = $this->readNonWhitespaceChar($stream);
+        if ($first === null || strpbrk($first, '{["-0123456789tfn') === false) {
+            $stream->close();
+
+            throw new RuntimeException(sprintf('The index does not match "%s": no entry starts at byte %d.', $index->path, $byte));
+        }
+
+        $stream->pushBack($first);
+        // From the last checkpoint on, the checkpoints are made again — the first of them that one.
+        $documents = $this->streamValues($index->path, $stream, $entry, $checkpoints, $index->every ?? 1000, stopAtCutOff: true);
+        foreach ($documents as $ignored) {
+        }
+
+        return new JsonIndex($index->path, null, JsonIndex::VALUES, $documents->getReturn(), $checkpoints, $size, $modified, $this->tailDigest($index->path, $size), $index->every);
+    }
+
+    /**
+     * A digest of the last bytes before $size — what extendIndex() compares to tell a file only
+     * appended to from one changed. Not proof: a change before them goes unseen, but a log rotated, a
+     * file rewritten or cut and written again changes them.
+     */
+    private function tailDigest(string $path, int $size): string|null
+    {
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+
+        try {
+            $from = max(0, $size - self::TAIL_BYTES);
+            $length = $size - $from;
+            fseek($handle, $from);
+            $bytes = $length > 0 ? fread($handle, $length) : '';
+
+            return $bytes === false ? null : hash('xxh128', $bytes);
+        } finally {
+            fclose($handle);
+        }
     }
 
     /**
@@ -4992,16 +5215,38 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     public function readFrom(JsonIndex $index, int $offset = 0, int|null $limit = null): Generator
     {
         $this->assertLimitAndOffset($limit, $offset);
+        $this->assertIndexMatchesFile($index);
 
+        return $this->readIndexed($index, $offset, $limit);
+    }
+
+    /**
+     * @throws RuntimeException
+     */
+    private function assertIndexMatchesFile(JsonIndex $index): void
+    {
         clearstatcache(true, $index->path);
         if (!is_file($index->path) || filesize($index->path) !== $index->size || filemtime($index->path) !== $index->modified) {
             throw new RuntimeException(sprintf(
-                'File "%s" has changed since it was indexed, or is gone; index it again.',
+                'File "%s" has changed since it was indexed, or is gone; %s.',
                 $index->path,
+                $index->container === JsonIndex::VALUES ? 'extend the index with extendIndex(), or index it again' : 'index it again',
             ));
         }
+    }
 
-        return $this->readIndexed($index, $offset, $limit);
+    /**
+     * The index stands for the file and the container: a key path beside it would name another.
+     *
+     * @param string|array<int, string>|null $keyPath
+     *
+     * @throws InvalidArgumentException
+     */
+    private function assertNoKeyPathWithIndex(string|array|null $keyPath): void
+    {
+        if ($keyPath !== null && $keyPath !== '') {
+            throw new InvalidArgumentException('An index names its own container; pass no key path with it.');
+        }
     }
 
     /**
@@ -5036,12 +5281,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             if ($index->container === JsonIndex::VALUES) {
                 // Documents are numbered as readValues() numbers them, refused ones too, so the window
                 // is of document numbers: a refused one inside it is a document fewer, not one more.
-                $end = $limit === null ? null : $offset + $limit;
-                foreach ($this->streamValues($index->path, $stream, $entry) as $number => $document) {
-                    if ($end !== null && $number >= $end) {
-                        return;
-                    }
-
+                // No further than the documents indexed: past them may be one its writer is still on.
+                $end = $limit === null ? $index->count() : min($offset + $limit, $index->count());
+                foreach ($this->streamValues($index->path, $stream, $entry, until: $end) as $number => $document) {
                     if ($number >= $offset) {
                         yield $number => $document;
                     }

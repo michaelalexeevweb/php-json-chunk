@@ -3,6 +3,22 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.2.0 — 2026-11-23
+
+### Added
+
+- **`extendIndex()`: an index of a growing log, kept up.** A log or an export grows by what is appended to it, and a changed file made its index refuse to read — five million lines indexed again for the fifty thousand added. `extendIndex($index)` reads from the index's last checkpoint on, and only that: 0.03 s for 50 000 lines appended to five million, against 3.2 s to index them all again. It is refused for a file changed rather than appended to — shorter, or its last 4 KB before the old end not what they were — and for an index of a list or an object. An index keeps a digest of those bytes and its `every`, saved by `toJson()`; one saved before 2.2.0 cannot be extended and says so. `readFrom()` on a grown sequence suggests it.
+- **`count()`, `getFirst()`, `getLast()` and `getNth()` take an index** in place of a path: the count from the index without reading, an entry from the nearest checkpoint, after checking that the file has not changed.
+
+### Changed
+
+- **A sequence indexed while it is being written.** `indexValues()` on a file that ends inside a document — a log whose writer is half-way through a line — failed with "unexpected end of input". That document is now left out, as one not finished yet: not counted, not handed to `onInvalidItem`, and reads from the index stop before it; `extendIndex()` reads it once it is whole. `readValues()` still refuses such a file, which it reads as it is.
+- **An index of short lines has a checkpoint every `every` lines.** Lines are taken a block at a time, and a checkpoint fell only where a batch started: a 64 KB block of short lines left one where `every: 100` asked for hundreds. The checkpoints due inside a batch are now found in it, from the lengths of its lines; reading is as fast as before, indexing very short lines 4 % slower for the checkpoints it now makes.
+
+### Tests
+
+- The test of a read that fails without printing is skipped when the process runs as root, which writes where the permissions it relies on say no one may.
+
 ## 2.1.2 — 2026-11-23
 
 ### Fixed

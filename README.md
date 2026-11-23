@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.1.2
+composer require michaelalexeevweb/php-json-chunk:^2.2.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -567,6 +567,21 @@ The index of five million records saves as 94 KB. It is of one container — a l
 wildcard — in a file, not a stream, since reading from it seeks; and it belongs to the file as it was:
 a file whose size or modification time has changed since is refused, rather than read at the wrong
 places.
+
+`count()`, `getFirst()`, `getLast()` and `getNth()` take an index in place of a path, and answer from it
+— the count without reading at all, an entry from the nearest checkpoint:
+
+```php
+$path = tempnam(sys_get_temp_dir(), 'export');
+file_put_contents($path, json_encode(['users' => array_map(fn($i) => ['id' => $i], range(0, 9999))]));
+$index = $reader->index($path, 'users');
+
+echo $reader->count($index), PHP_EOL;                   // 10000, from the index
+echo $reader->getNth($index, 9_000)['id'], PHP_EOL;     // 9000
+echo $reader->getLast($index)['id'], PHP_EOL;           // 9999
+
+unlink($path);
+```
 
 ### Several processes at once
 
@@ -1275,6 +1290,28 @@ unlink($path);
 Five million lines (404 MB): the last one in 2.69 s without the index, 0.1 ms with it; the index took
 2.58 s to build, once. Read with `readInParallel()`, 12 workers took 0.65 s against 4.44 s for a plain
 `readValues()` — 6.8×. Details in [BENCHMARKS.md](BENCHMARKS.md).
+
+A log grows by what is appended to it, and an index of it need not be made again: `extendIndex()` reads
+from its last checkpoint on, and only that. Five million lines with 50 000 appended: 0.03 s, against
+3.2 s to index them all again.
+
+```php
+$path = tempnam(sys_get_temp_dir(), 'events');
+file_put_contents($path, implode("\n", array_map(fn($i) => json_encode(['id' => $i]), range(0, 999))) . "\n");
+$index = $reader->indexValues($path);
+
+file_put_contents($path, json_encode(['id' => 1000]) . "\n", FILE_APPEND);   // the log grows
+$index = $reader->extendIndex($index);
+echo $reader->count($index), PHP_EOL;                    // 1001
+
+unlink($path);
+```
+
+It is refused for a file changed rather than appended to — shorter than it was, or its last 4 KB before
+the old end no longer what they were, as after a rotation — and for an index of a list or an object,
+whose closing bracket makes one that grew another document. A sequence indexed while its writer is
+half-way through a document ends inside it: that document is not refused but left out, as one not
+finished yet, reads from the index stop before it, and `extendIndex()` reads it once it is whole.
 
 ## Conformance
 

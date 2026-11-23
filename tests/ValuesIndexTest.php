@@ -64,6 +64,8 @@ final class ValuesIndexTest extends TestCase
         yield 'every kind of document, some pretty-printed' => [implode("\n", $mixed)];
         yield 'record separators' => ["\x1E" . implode("\n\x1E", array_slice($lines, 0, 1500)) . "\n"];
         yield 'nothing between objects' => [implode('', array_slice($lines, 0, 1500))];
+        // A blank line is skipped in a batch of lines, and parts the places of lines and documents.
+        yield 'blank lines between some' => [implode('', array_map(static fn(int $i, string $line): string => $line . ($i % 5 === 0 ? "\n\n" : "\r\n"), array_keys($lines), $lines))];
         yield 'one document' => ['{"only":1}'];
         yield 'documents larger than a block' => [implode("\n", array_map(
             static fn(int $i): string => (string)json_encode(['id' => $i, 'pad' => str_repeat('x', $i % 3 === 0 ? 90_000 : 10)]),
@@ -133,6 +135,20 @@ final class ValuesIndexTest extends TestCase
         self::assertSame([20, 21, 22, 23, 24, 26, 27, 28, 29], array_keys($window));
         self::assertSame(array_filter($all, static fn(int $number): bool => $number >= 20 && $number < 30, ARRAY_FILTER_USE_KEY), $window);
         self::assertSame(array_column($all, 'id'), array_keys($all));
+    }
+
+    /**
+     * Short lines are taken a block at a time, and a checkpoint can only fall where a batch starts:
+     * a block of 3 000 short lines left one checkpoint where every 100 asked for thirty. Indexing, a
+     * batch now ends where the next checkpoint is due.
+     */
+    public function testShortLinesGetACheckpointEveryEveryEntries(): void
+    {
+        $path = $this->file(implode('', array_map(static fn(int $i): string => '{"i":' . $i . "}\n", range(0, 2999))));
+
+        $entries = array_map(static fn($checkpoint): int => $checkpoint->entry, (new JsonChunkReader())->indexValues($path, every: 100)->checkpoints());
+
+        self::assertSame(range(0, 2900, 100), $entries);
     }
 
     public function testAnEmptyFileHasNothingToRead(): void

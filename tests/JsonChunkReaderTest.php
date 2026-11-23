@@ -400,6 +400,13 @@ final class JsonChunkReaderTest extends \PHPUnit\Framework\TestCase
         $blockedParent = (string)tempnam(sys_get_temp_dir(), 'pjc-blocked-');
         @unlink($blockedParent);
         mkdir($blockedParent, 0o500, true);
+        if (is_writable($blockedParent)) {
+            // Root writes where the permissions say no one may: nothing blocks the read, and there is
+            // no failure to watch for a warning.
+            chmod($blockedParent, 0o755);
+            @rmdir($blockedParent);
+            self::markTestSkipped('The permissions do not block this process — it runs as root.');
+        }
 
         $source = (string)tempnam(sys_get_temp_dir(), 'pjc-warn-');
         file_put_contents($source, '[{"id":1},{"id":2}]');
