@@ -10,6 +10,7 @@ use Iterator;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\JsonIndex;
 use PhpJsonChunk\Partition;
+use PhpJsonChunk\ValidationError;
 use PhpJsonChunk\Workers;
 use RuntimeException;
 
@@ -175,6 +176,42 @@ interface JsonChunkReaderInterface
      * @throws RuntimeException
      */
     public function extendIndex(JsonIndex $index): JsonIndex;
+
+    /**
+     * The entries of one container as the JSON they are written in, each checked to be valid.
+     *
+     * @param string|array<int, string>|null $keyPath
+     *
+     * @return Generator<int|string, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readRaw(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0, string|array|null $keyPath = null): Generator;
+
+    /**
+     * The documents of a sequence as the JSON they are written in, each checked to be valid.
+     *
+     * @return Generator<int|string, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readValuesRaw(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator;
+
+    /**
+     * Null when the document is valid JSON, why and where when it is not.
+     *
+     * @throws RuntimeException
+     */
+    public function validate(string|JsonSourceInterface $filePath): ValidationError|null;
+
+    /**
+     * validate() for a sequence of documents.
+     *
+     * @throws RuntimeException
+     */
+    public function validateValues(string|JsonSourceInterface $filePath): ValidationError|null;
 
     /**
      * Reads an indexed container with $workers processes forked side by side, $handler called in them

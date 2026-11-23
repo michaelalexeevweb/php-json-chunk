@@ -3,6 +3,18 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.4.0 — 2026-11-23
+
+### Added
+
+- **`readRaw()` and `readValuesRaw()`: entries as the JSON they are written in.** To pass records on — to another file, a queue, a database's JSON column — without a `json_decode()` and a `json_encode()` of each, and with nothing lost: a large integer stays its digits, `1.10` stays `1.10`. Each entry is still checked — by `json_validate()` where PHP has it — and refused, or handed to `onInvalidItem`, as `readGenerator()` does. As fast as `readGenerator()`; a million records copied from a list to NDJSON 733 ms → 565 ms. Objects of a list are taken a run at a time: the run decoded once, which checks it and counts its elements, and cut at every `},{` with JSON's spaces around the comma — a cut inside a string or inside an element only adds a piece, so as many pieces as elements means each piece is one. Tested against `readGenerator()` and `readValues()` on random documents in three block sizes, compact and pretty-printed, and on JSONTestSuite: the same values, the same refusals with the same words; six mutants, all caught.
+- **`validate()` and `validateValues()`: is it valid JSON?** A file checked as it streams: `null`, or a `ValidationError` with the reason and the byte, without an exception to catch. Strict whatever `onInvalidItem` says; an element over `maxElementBytes` is an error too; a root that is a string or a number is read whole — from a stream as well, its first block kept to be read again. Every root-array document of JSONTestSuite gets `json_decode()`'s verdict.
+- **`Psr7Source`: a PSR-7 stream** — a Guzzle or Symfony response's body — read through its own `read()` and `eof()`, with no PSR package needed, and not closed. And the README shows a gzipped file read through PHP's zlib stream, which a test now holds to.
+
+### Performance
+
+- **`readGenerator()` 16 % faster, a wildcard path 7 %.** With no `limit`, `offset` or `chunkSize` there is nothing to cut, but every value still went through a generator that looked at it only to hand it on; it is now delegated. A million records: 530 ms → 445 ms; `*.id` 1 300 ms → 1 213 ms. Found while making `readRaw()` as fast as it.
+
 ## 2.3.1 — 2026-11-23
 
 ### Performance

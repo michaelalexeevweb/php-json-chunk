@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.3.1
+composer require michaelalexeevweb/php-json-chunk:^2.4.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -360,6 +360,40 @@ foreach ($reader->readGenerator(new StreamSource($handle, 'the export'), keyPath
 }
 ```
 
+Or the body as it is, with `Psr7Source` — any PSR-7 stream, read through its own `read()` and `eof()`, the
+library needing no PSR package. It does not close the stream, which belongs to the response:
+
+```php
+// Recipe: needs guzzlehttp/guzzle and a network — checked for syntax by the tests, not run.
+use GuzzleHttp\Client;
+use PhpJsonChunk\Source\Psr7Source;
+
+$response = (new Client())->get('https://api.example.com/export', ['stream' => true]);
+
+foreach ($reader->readGenerator(new Psr7Source($response->getBody()), keyPath: 'data') as $record) {
+    // ...
+}
+```
+
+#### A gzipped file
+
+PHP's zlib stream unpacks it as it is read; hand it over as a stream — a bare `compress.zlib://` path is
+refused, as every wrapper is:
+
+```php
+use PhpJsonChunk\Source\StreamSource;
+
+$path = tempnam(sys_get_temp_dir(), 'export') . '.json.gz';
+file_put_contents($path, gzencode(json_encode(['data' => [['id' => 1], ['id' => 2]]])));
+
+$handle = fopen('compress.zlib://' . $path, 'rb');
+foreach ($reader->readGenerator(new StreamSource($handle), keyPath: 'data') as $record) {
+    echo $record['id'], PHP_EOL;   // 1, 2
+}
+fclose($handle);
+unlink($path);
+```
+
 With Symfony HttpClient, the response streams in chunks:
 
 ```php
@@ -407,7 +441,59 @@ $reader->read(__DIR__ . '/data.json', keyPath: ['a.b']);          // a key conta
 `'*'` means "every element of this list" in both forms — never a member named `"*"`. The list form
 also reaches a key that is the empty string: `['', 'items']`.
 
+### Entries as written: `readRaw()`
+
+To pass records on — to another file, a queue, a database's JSON column — decoding each only to encode
+it again is work for nothing, and it is not even faithful: a large integer becomes a float, `1.10`
+becomes `1.1`. `readRaw()` gives each entry as the JSON it is written in, its spaces inside kept; keys
+as `readGenerator()` gives them. `readValuesRaw()` does the same for a sequence, a line without its
+line break.
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+$export = new StringSource('{"data":[{"id": 12345678901234567890, "price": 1.10},{"id":2}]}');
+
+foreach ($reader->readRaw($export, keyPath: 'data') as $number => $json) {
+    echo $number, ': ', $json, PHP_EOL;   // 0: {"id": 12345678901234567890, "price": 1.10}, then 1: {"id":2}
+}
+```
+
+Each entry is still checked to be valid JSON, and one that is not is refused, or handed to
+`onInvalidItem`, as `readGenerator()` does. A million records copied from a list to NDJSON:
+
+| | time |
+|---|---:|
+| `readGenerator()`, then `json_encode()` of each | 733 ms |
+| `readRaw()`, written as it is | 565 ms |
+
+It reads as fast as `readGenerator()`: what it saves is the encoding after.
+
+### Is it valid? `validate()`
+
+A whole file checked as it streams, without an exception to catch: `null` when it is valid JSON, a
+`ValidationError` — the reason, and the byte — when it is not. Every element is decoded, whatever
+`onInvalidItem` says; a root that is a string or a number is valid too, and read whole.
+`validateValues()` checks a sequence.
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+var_dump($reader->validate(new StringSource('{"data":[1,2,3]}')));   // NULL
+
+$error = $reader->validate(new StringSource('[1,2,{"id":01}]'));
+echo $error->byte, ': ', $error->reason, PHP_EOL;                    // 5: Syntax error
+```
+
+The byte is where the entry of the root that holds the fault starts: `json_decode()`, which settles
+each entry, does not say where inside it it gave up. For a list of records that is the record; for an
+object at the root, the member — its whole value.
+
+Every root-array document of JSONTestSuite gets the verdict `json_decode()` gives it — a test runs them
+all.
+
 ### JSON Pointer
+
 
 A path written for JsonMachine, or any tool that speaks RFC 6901, works through `JsonPointer`, which
 reads the pointer into segments:

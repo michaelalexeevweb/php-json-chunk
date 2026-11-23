@@ -12,6 +12,7 @@ use JsonException;
 use PhpJsonChunk\Contract\JsonChunkReaderInterface;
 use PhpJsonChunk\Internal\CutOffException;
 use PhpJsonChunk\Internal\JsonStream;
+use PhpJsonChunk\Internal\ReplayingSource;
 use RuntimeException;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use PhpJsonChunk\Source\FileSource;
@@ -330,6 +331,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         try {
             $container = $this->positionStreamAtTargetArrayStart($stream, $keyPath);
 
+            // Nothing to cut or group: the entries as they come, delegated, without a generator in
+            // between that would look at each one only to hand it on — a tenth of the read.
+            if ($chunkSize === null && $limit === null && $offset === 0) {
+                yield from $this->streamContainer($stream, $filePath, $container);
+                $this->assertNothingFollowsRootArray($stream, $filePath, $keyPath);
+
+                return;
+            }
+
             $readToTheEnd = true;
 
             yield from $this->applyWindow(
@@ -503,6 +513,22 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return $this->newStream($filePath);
         }
 
+        // The buffer travels with the source, so nothing about this read lives on the reader.
+        $stream = $this->newStream($this->openFileSource($filePath, $at));
+        $stream->beginAt($at);
+
+        return $stream;
+    }
+
+    /**
+     * A file opened to be read from byte $at — or refused, with why.
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function openFileSource(string $filePath, int $at = 0): FileSource
+    {
+
         // A stream wrapper is not a missing file, and saying "was not found" about `php://memory`
         // sends the reader looking for something that was never supposed to exist. A wrapper CAN be
         // read — pass it as a `StreamSource` and it is — but a bare string of one is ambiguous enough
@@ -533,11 +559,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             throw new RuntimeException(sprintf('Unable to seek to byte %d of "%s".', $at, $filePath));
         }
 
-        // The buffer travels with the source, so nothing about this read lives on the reader.
-        $stream = $this->newStream(new FileSource($file, $filePath));
-        $stream->beginAt($at);
-
-        return $stream;
+        return new FileSource($file, $filePath);
     }
 
     /**
@@ -1379,6 +1401,13 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // Whether the wildcard walk reached the end is of no interest here: the trailing-content rule
         // applies to a ROOT array only, and a wildcard path is never one.
         $reachedTheEnd = true;
+
+        // Nothing to cut or group: the values as they come, delegated.
+        if ($chunkSize === null && $limit === null && $offset === 0) {
+            yield from $this->streamWildcardValues($filePath, $keyPath);
+
+            return;
+        }
 
         yield from $this->applyWindow(
             values: $this->streamWildcardValues($filePath, $keyPath),
@@ -5793,6 +5822,564 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         return $failures;
+    }
+
+    /**
+     * The entries of one container — a list's elements, an object's members — as the JSON they are
+     * written in, not decoded: to pass on to a file, a queue or a database's JSON column without a
+     * json_decode() and a json_encode() of each, and with nothing lost on the way — a large integer
+     * stays the digits it was, a float's last digit too. Keys as readGenerator() gives them.
+     *
+     * Each entry is still checked to be valid JSON — by json_validate(), which does not decode, where
+     * PHP has it, by json_decode() before 8.3 — and one that is not is refused, or handed to
+     * onInvalidItem, as readGenerator() does. The text is the entry's own, from its first character to
+     * its last, as the file has it: its spaces and line breaks inside are kept.
+     *
+     * @param string|array<int, string>|null $keyPath the container, as for readGenerator(); no wildcard
+     *
+     * @return Generator<int|string, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readRaw(
+        string|JsonSourceInterface $filePath,
+        int|null $limit = null,
+        int $offset = 0,
+        string|array|null $keyPath = null,
+    ): Generator {
+        $this->assertLimitAndOffset($limit, $offset);
+        if ($keyPath !== null && $keyPath !== '' && $this->hasWildcardSegment($keyPath)) {
+            throw new InvalidArgumentException('readRaw() reads one container; a key path with a wildcard names many.');
+        }
+
+        // Nothing to cut: the entries as they come, without a generator around them that would look at
+        // each one only to hand it on — a fifth of the read.
+        if ($limit === null && $offset === 0) {
+            return $this->streamRaw($filePath, $keyPath);
+        }
+
+        $readToTheEnd = true;
+
+        return $this->applyWindow(
+            values: $this->streamRaw($filePath, $keyPath),
+            chunkSize: null,
+            limit: $limit,
+            offset: $offset,
+            readToTheEnd: $readToTheEnd,
+            preserveKeys: true,
+        );
+    }
+
+    /**
+     * The documents of a sequence — JSON Lines, NDJSON — as the JSON they are written in, as
+     * readValues() reads them but not decoded; see readRaw(). A document one to a line is its line,
+     * without the line break and the spaces around it.
+     *
+     * @return Generator<int|string, string> keyed by the document's number, from 0
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    public function readValuesRaw(string|JsonSourceInterface $filePath, int|null $limit = null, int $offset = 0): Generator
+    {
+        $this->assertLimitAndOffset($limit, $offset);
+        if ($limit === null && $offset === 0) {
+            return $this->streamRawValues($filePath);
+        }
+
+        $readToTheEnd = true;
+
+        return $this->applyWindow(
+            values: $this->streamRawValues($filePath),
+            chunkSize: null,
+            limit: $limit,
+            offset: $offset,
+            readToTheEnd: $readToTheEnd,
+        );
+    }
+
+    /**
+     * @param string|array<int, string>|null $keyPath
+     *
+     * @return Generator<int|string, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function streamRaw(string|JsonSourceInterface $filePath, string|array|null $keyPath): Generator
+    {
+        $stream = $this->openFile($filePath);
+        $sourceName = $this->describeSource($filePath);
+
+        try {
+            $container = $this->positionStreamAtTargetArrayStart($stream, $keyPath);
+            $close = $container === '{' ? '}' : ']';
+            $next = $this->readNonWhitespaceChar($stream);
+            if ($next === $close) {
+                $this->assertNothingFollowsRootArray($stream, $sourceName, $keyPath);
+
+                return;
+            }
+
+            if ($next === null) {
+                throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, 'unexpected end of input in ' . ($container === '{' ? 'object' : 'array') . '.', $stream));
+            }
+
+            $stream->pushBack($next);
+            $produced = 0;
+            $index = 0;
+            while (true) {
+                $key = $produced;
+                if ($container === '{') {
+                    $keyFirst = $this->readNonWhitespaceChar($stream);
+                    if ($keyFirst !== '"') {
+                        throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, 'object key must be a string.', $stream));
+                    }
+
+                    $key = (string)$this->decodeScannedValue($this->readStringToken($stream, $sourceName), $sourceName, $stream);
+                    $separator = $this->readNonWhitespaceChar($stream);
+                    if ($separator !== ':') {
+                        throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, 'expected ":" after object key.', $stream));
+                    }
+                }
+
+                $valueFirst = $this->readNonWhitespaceChar($stream);
+                if ($valueFirst === null) {
+                    throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, 'unexpected end of input in ' . ($container === '{' ? 'object value' : 'array value') . '.', $stream));
+                }
+
+                $valueOffset = $stream->offset() - 1;
+
+                // Objects of a list, several at a time: each already checked.
+                if ($container === '[' && ($run = $this->rawRunFast($stream, $valueFirst)) !== null) {
+                    foreach ($run as $element) {
+                        yield $produced++ => $element;
+                    }
+                    $index += count($run);
+
+                    $delimiter = $this->readNonWhitespaceChar($stream);
+                    if ($delimiter === $close) {
+                        break;
+                    }
+
+                    if ($delimiter !== ',') {
+                        throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, 'expected "," or "]" in array.', $stream));
+                    }
+
+                    continue;
+                }
+
+                $raw = $this->rawContainerFast($stream, $valueFirst) ?? $this->scanValue($stream, $valueFirst, $sourceName);
+                if ($this->isValidJson($raw)) {
+                    $produced++;
+                    yield $key => $raw;
+                } else {
+                    $this->refuseRaw($raw, $valueOffset, $container === '{' ? $key : $index, $sourceName);
+                }
+
+                $index++;
+                $delimiter = $this->readNonWhitespaceChar($stream);
+                if ($delimiter === $close) {
+                    break;
+                }
+
+                if ($delimiter !== ',') {
+                    throw new InvalidArgumentException($this->invalidJsonMessage($sourceName, sprintf('expected "," or "%s" in %s.', $close, $container === '{' ? 'object' : 'array'), $stream));
+                }
+            }
+
+            $this->assertNothingFollowsRootArray($stream, $sourceName, $keyPath);
+        } finally {
+            $stream->close();
+        }
+    }
+
+    /**
+     * @return Generator<int, string>
+     *
+     * @throws InvalidArgumentException
+     * @throws RuntimeException
+     */
+    private function streamRawValues(string|JsonSourceInterface $filePath): Generator
+    {
+        $stream = $this->openFile($filePath);
+        $sourceName = $this->describeSource($filePath);
+        // Checked in the loop itself, not through isValidJson(): a call more per line was a fifth of it.
+        $validate = PHP_VERSION_ID >= 80300;
+        $limit = (int)$this->maxElementBytes;
+        $limited = $this->maxElementBytes !== null;
+
+        try {
+            $index = 0;
+            while (true) {
+                $first = $this->readNonWhitespaceChar($stream);
+                while ($first === "\x1E") {
+                    $first = $this->readNonWhitespaceChar($stream);
+                }
+
+                if ($first === null) {
+                    return;
+                }
+
+                if ($index === 0) {
+                    $this->assertNoByteOrderMark($first);
+                }
+
+                $valueOffset = $stream->offset() - 1;
+
+                // One to a line, the lines of the block that are whole documents: taken as they stand,
+                // each checked as it is handed on — gathered first, they cost a pass of their own.
+                $batch = $this->rawLinesFast($stream);
+                if ($batch !== null) {
+                    [$document, $lines, $start, $end, $last, $trim] = $batch;
+                    yield $index++ => $document;
+
+                    $all = count($lines);
+                    $used = $all;
+                    foreach ($lines as $number => $line) {
+                        $document = $trim ? rtrim($line, " \t\r") : $line;
+                        if ($document === '') {
+                            // A blank line between documents, as the scanner skips it.
+                            continue;
+                        }
+
+                        if (($limited && strlen($document) > $limit) || !($validate ? json_validate($document) : $this->isValidJson($document))) {
+                            $used = $number;
+
+                            break;
+                        }
+
+                        yield $index++ => $document;
+                    }
+
+                    // Up to the last newline, or to the line not taken: those before it, and their newlines.
+                    $stream->bufPos = $end + 1 + ($used === $all && $last !== null
+                        ? $last + 1
+                        : array_sum(array_map('strlen', array_slice($lines, 0, $used))) + $used);
+
+                    continue;
+                }
+
+                $raw = $first === '{' || $first === '[' || $first === '"'
+                    ? $this->scanValue($stream, $first, $sourceName)
+                    : $this->scanPrimitive($stream, $first, ",]} \t\n\r\x1E[{\"");
+                if (!$this->isValidJson($raw)) {
+                    $this->refuseRaw($raw, $valueOffset, $index++, $sourceName);
+
+                    continue;
+                }
+
+                yield $index++ => $raw;
+            }
+        } finally {
+            $stream->close();
+        }
+    }
+
+    /**
+     * The line of the document just entered, when it is one whole document — checked by
+     * json_validate() where PHP has it — without its line break and the spaces around it, and the
+     * whole lines after it in the block, split in C, for the caller to check as it hands them on.
+     * Null, with the stream untouched, when the first line is not one. A line cut by the end of the
+     * block is read on into the next one, as takeLines() does.
+     *
+     * @return array{0: string, 1: array<int, string>, 2: int, 3: int, 4: int|null, 5: bool}|null the
+     *         first document, the lines after it, where the first starts and ends, where the last of
+     *         the lines ends, counted from just after the first, and whether any of them ends in
+     *         spaces or a carriage return to trim
+     */
+    private function rawLinesFast(JsonStream $stream): array|null
+    {
+        if ($stream->charBuffer !== []) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $start < ($stream->noRunBefore['lines'] ?? 0)) {
+            return null;
+        }
+
+        $end = strpos($stream->buf, "\n", $start);
+        if ($end === false && $start > 0 && $stream->extend($start)) {
+            $start = 0;
+            $end = strpos($stream->buf, "\n");
+        }
+
+        $until = min($stream->bufLen, $start + self::LINES_BYTES);
+        if ($end === false || $end >= $until) {
+            $stream->noRunBefore['lines'] = $end === false ? $stream->bufLen : $end;
+
+            return null;
+        }
+
+        $document = rtrim(substr($stream->buf, $start, $end - $start), " \t\r");
+        if (($this->maxElementBytes !== null && strlen($document) > $this->maxElementBytes) || !$this->isValidJson($document)) {
+            $stream->noRunBefore['lines'] = $end;
+
+            return null;
+        }
+
+        $last = $until > $end + 1 ? strrpos($stream->buf, "\n", $until - $stream->bufLen - 1) : false;
+        if ($last === false || $last <= $end) {
+            $stream->bufPos = $end + 1;
+
+            return [$document, [], $start, $end, null, false];
+        }
+
+        // Whether any line ends in what to trim, asked of them all at once: most files have none, and
+        // asking each line was a fifth of the read.
+        $text = substr($stream->buf, $end + 1, $last - $end - 1);
+        $trim = str_contains($text, "\r") || str_contains($text, " \n") || str_contains($text, "\t\n")
+            || str_ends_with($text, ' ') || str_ends_with($text, "\t");
+
+        return [$document, explode("\n", $text), $start, $end, $last - $end - 1, $trim];
+    }
+
+    /**
+     * Objects of a list, several at a time and not decoded: from the one just entered to the last `},`
+     * within RUN_BYTES, cut at every `},{` between them — JSON's own spaces around the comma, not
+     * PCRE's — and each piece checked to be valid JSON. A cut inside a string leaves a piece with a
+     * quote unclosed, and one inside an element — at a `},{` of a list inside it — a piece with its
+     * brackets unbalanced: neither is valid, and such a piece is joined to the next until it is. A
+     * valid piece is one element exactly: no valid JSON value starts with a value that is valid too.
+     * Null when not one element can be had so; they are then read one at a time.
+     *
+     * @return array<int, string>|null
+     */
+    private function rawRunFast(JsonStream $stream, string $first): array|null
+    {
+        if ($first !== '{' || $stream->charBuffer !== [] || $stream->fastMisses >= 8) {
+            return null;
+        }
+
+        if ($this->maxElementBytes !== null && $this->maxElementBytes < self::RUN_BYTES) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== '{' || $start < ($stream->noRunBefore['raw'] ?? 0)) {
+            return null;
+        }
+
+        $end = min($stream->bufLen, $start + self::RUN_BYTES);
+        $searchFrom = $end - 2 - $stream->bufLen;
+        $found = $searchFrom < -$stream->bufLen ? false : strrpos($stream->buf, '},', $searchFrom);
+        if ($found === false || $found <= $start) {
+            $stream->noRunBefore['raw'] = $end;
+
+            return null;
+        }
+
+        $run = substr($stream->buf, $start, $found + 1 - $start);
+        $boundary = '/(?<=\})[ \t\n\r]*,[ \t\n\r]*(?=\{)/';
+
+        // The whole run checked at once by one json_decode(), which also counts its elements. Every
+        // place between two of them is cut — `}`, JSON's spaces, `,`, `{` — and a cut anywhere else, in
+        // a string or at a list of objects inside an element, only adds a piece: as many pieces as
+        // elements, and each piece is an element. json_validate() would not count them, and checks a
+        // record not much faster than json_decode() builds it.
+        $values = json_decode('[' . $run . ']', false, 512, $this->decodeFlags & ~JSON_THROW_ON_ERROR);
+        if (is_array($values) && json_last_error() === JSON_ERROR_NONE) {
+            $texts = preg_split($boundary, $run);
+            if ($texts !== false && count($texts) === count($values)) {
+                $stream->bufPos = $found + 1;
+                $stream->fastMisses = 0;
+
+                return $texts;
+            }
+        }
+
+        $pieces = preg_split($boundary, $run, -1, PREG_SPLIT_OFFSET_CAPTURE);
+        if ($pieces === false) {
+            return null;
+        }
+
+        $elements = [];
+        $from = null;
+        $consumed = 0;
+        $joined = 0;
+        foreach ($pieces as [$piece, $offset]) {
+            $from ??= $offset;
+            $candidate = substr($run, $from, $offset + strlen($piece) - $from);
+            if (!$this->isValidJson($candidate)) {
+                // Part of an element, or of a string: joined to the next — not without end.
+                if (++$joined > 16) {
+                    break;
+                }
+
+                continue;
+            }
+
+            $elements[] = $candidate;
+            $consumed = $offset + strlen($piece);
+            $from = null;
+            $joined = 0;
+        }
+
+        if ($elements === []) {
+            $stream->noRunBefore['raw'] = $end;
+            $stream->fastMisses++;
+
+            return null;
+        }
+
+        $stream->bufPos = $start + $consumed;
+        $stream->fastMisses = 0;
+
+        return $elements;
+    }
+
+    /**
+     * A container the stream has just entered, found by the guess decodeContainerFast() makes and
+     * settled by json_validate() instead of json_decode(): its text, or null to leave it to the scanner.
+     */
+    private function rawContainerFast(JsonStream $stream, string $first): string|null
+    {
+        if (($first !== '{' && $first !== '[') || $stream->charBuffer !== [] || $stream->fastMisses >= 8) {
+            return null;
+        }
+
+        $start = $stream->bufPos - 1;
+        if ($start < 0 || $stream->buf[$start] !== $first) {
+            return null;
+        }
+
+        $close = $first === '{' ? '}' : ']';
+        $at = $this->nextHit($stream, $close . ',');
+        $counted = $start;
+        $depth = 0;
+        while ($at < $stream->bufLen) {
+            $span = $at + 1 - $counted;
+            $depth += substr_count($stream->buf, $first, $counted, $span) - substr_count($stream->buf, $close, $counted, $span);
+            $counted = $at + 1;
+            if ($depth < 0) {
+                break;
+            }
+
+            if ($depth === 0) {
+                $length = $at + 1 - $start;
+                if ($this->maxElementBytes !== null && $length > $this->maxElementBytes) {
+                    break;
+                }
+
+                $raw = substr($stream->buf, $start, $length);
+                if (!$this->isValidJson($raw)) {
+                    break;
+                }
+
+                $stream->bufPos = $at + 1;
+                $stream->fastMisses = 0;
+
+                return $raw;
+            }
+
+            $found = strpos($stream->buf, $close . ',', $at + 1);
+            $at = $found === false ? $stream->bufLen : $found;
+        }
+
+        $stream->fastMisses++;
+
+        return null;
+    }
+
+    /**
+     * Whether $json is one valid JSON value, as json_decode() with the reader's depth would take it —
+     * json_validate() where PHP has it, which does not build the value.
+     */
+    private function isValidJson(string $json): bool
+    {
+        if (function_exists('json_validate')) {
+            return json_validate($json, 512);
+        }
+
+        json_decode($json, false, 512);
+
+        return json_last_error() === JSON_ERROR_NONE;
+    }
+
+    /**
+     * An entry read raw that is not valid JSON: refused, or handed to onInvalidItem, with
+     * json_decode()'s own complaint — what readGenerator() would say of it.
+     *
+     * @throws InvalidArgumentException
+     */
+    private function refuseRaw(string $raw, int $offset, int|string|null $key, string $sourceName): void
+    {
+        try {
+            json_decode($raw, false, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            $this->handOverInvalidItem($exception, $raw, $offset, $key, $sourceName);
+        }
+    }
+
+    /**
+     * Whether a document is valid JSON, read through as a stream: null when it is, why when it is not —
+     * the reason and the byte — instead of an exception. Strict throughout: every element is decoded,
+     * whatever the reader's onInvalidItem, and the bracket after the root must be the end. The
+     * reader's limits apply — maxElementBytes, the depth of 512 json_decode() has.
+     *
+     * A document whose root is a string, a number, true, false or null is valid JSON too, and read
+     * whole to be checked: there is nothing to stream in it.
+     *
+     * An element over maxElementBytes is an error too, with the byte read up to.
+     *
+     * @throws RuntimeException when the file cannot be read at all
+     */
+    public function validate(string|JsonSourceInterface $filePath): ValidationError|null
+    {
+        $source = new ReplayingSource(is_string($filePath) ? $this->openFileSource($filePath) : $filePath);
+        $strict = $this->withoutInvalidItemHandler();
+
+        try {
+            foreach ($strict->readGenerator($source) as $ignored) {
+            }
+
+            return null;
+        } catch (ElementTooLargeException $exception) {
+            return ValidationError::fromException($exception);
+        } catch (InvalidArgumentException $exception) {
+            if (!str_starts_with($exception->getMessage(), 'The JSON root value must be')) {
+                return ValidationError::fromException($exception);
+            }
+
+            // A root that is not a container: the whole of it, from the first block on.
+            $whole = $source->replay();
+            json_decode($whole, $this->associative, 512, $this->decodeFlags & ~JSON_THROW_ON_ERROR);
+
+            return json_last_error() === JSON_ERROR_NONE
+                ? null
+                : new ValidationError(sprintf('Invalid JSON in "%s": %s', $source->describe(), json_last_error_msg()), json_last_error_msg(), null);
+        } finally {
+            $source->release();
+        }
+    }
+
+    /**
+     * validate() for a sequence of documents — JSON Lines, NDJSON — as readValues() reads them.
+     *
+     * @throws RuntimeException when the file cannot be read at all
+     */
+    public function validateValues(string|JsonSourceInterface $filePath): ValidationError|null
+    {
+        try {
+            foreach ($this->withoutInvalidItemHandler()->readValues($filePath) as $ignored) {
+            }
+
+            return null;
+        } catch (InvalidArgumentException | ElementTooLargeException $exception) {
+            return ValidationError::fromException($exception);
+        }
+    }
+
+    /**
+     * This reader as it is, but refusing what it would hand to onInvalidItem.
+     */
+    private function withoutInvalidItemHandler(): self
+    {
+        return $this->onInvalidItem === null
+            ? $this
+            : new self($this->associative, null, $this->blockSize, $this->maxElementBytes, ($this->decodeFlags & JSON_BIGINT_AS_STRING) !== 0);
     }
 
     /**
