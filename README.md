@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.16.0
+composer require michaelalexeevweb/php-json-chunk:^1.17.0
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -443,6 +443,21 @@ $reader = new JsonChunkReader(associative: false);   // items come back as stdCl
 ```
 
 Object keys stay strings whatever this says: a key is a name, not a value.
+
+### Integers bigger than PHP's
+
+An id of 20 digits, an amount in the smallest unit: an integer past `PHP_INT_MAX` becomes a float when
+decoded, and its last digits are gone — `12345678901234567890` comes back as `1.2345678901234567E+19`.
+`bigIntAsString` keeps every digit, as a string:
+
+```php
+use PhpJsonChunk\Source\StringSource;
+
+$exact = new JsonChunkReader(bigIntAsString: true);
+$id = $exact->getValue(new StringSource('{"id":12345678901234567890}'), 'id');   // "12345678901234567890"
+```
+
+Integers that fit stay integers, and floats stay floats.
 
 ### Stopping early
 

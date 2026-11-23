@@ -58,22 +58,31 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      *        read, before it is all in memory. Null, the default, sets no limit. Give one when the document
      *        comes from someone else: a single 500 MB string otherwise ends PHP with a fatal error. A
      *        branch the path only skips is never held, and is not limited.
+     * @param bool $bigIntAsString an integer bigger than PHP's — a 20-digit id, an amount in the smallest
+     *        unit — comes back as a string with every digit, instead of a float that has lost the last of
+     *        them. Integers that fit stay integers.
      */
     public function __construct(
         private readonly bool $associative = true,
         callable|null $onInvalidItem = null,
         private readonly BlockSize $blockSize = BlockSize::Auto,
         private readonly int|null $maxElementBytes = null,
+        bool $bigIntAsString = false,
     ) {
         if ($maxElementBytes !== null && $maxElementBytes < 1) {
             throw new InvalidArgumentException('maxElementBytes must be at least 1, or null for no limit.');
         }
+
+        $this->decodeFlags = JSON_THROW_ON_ERROR | ($bigIntAsString ? JSON_BIGINT_AS_STRING : 0);
 
         $this->onInvalidItem = $onInvalidItem === null ? null : $onInvalidItem(...);
     }
 
     /** @var (Closure(InvalidItem): mixed)|null */
     private readonly Closure|null $onInvalidItem;
+
+    /** The flags every value is decoded with: JSON_THROW_ON_ERROR, and JSON_BIGINT_AS_STRING when asked. */
+    private readonly int $decodeFlags;
 
     private const DEFAULT_TEMP_CHUNK_SIZE = 1000;
 
@@ -631,7 +640,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
                 try {
-                    yield (string)$key => json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
+                    yield (string)$key => json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
                     $this->handOverInvalidItem($exception, $rawValue, $valueOffset, (string)$key, $filePath);
                 }
@@ -770,7 +779,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $rawValue = $this->scanValue($stream, $valueFirst, $filePath);
 
                 try {
-                    yield json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
+                    yield json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
                     $this->handOverInvalidItem($exception, $rawValue, $valueOffset, $index, $filePath);
                 }
@@ -1552,7 +1561,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $value = $this->decodeScannedValue($raw, $filePath, $stream);
             } else {
                 try {
-                    $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+                    $value = json_decode($raw, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
                     // The paths that go on below this value would walk the same broken bytes.
                     $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
@@ -2315,7 +2324,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $value = $this->decodeScannedValue($raw, $filePath, $stream);
         } else {
             try {
-                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+                $value = json_decode($raw, $this->associative, 512, $this->decodeFlags);
             } catch (JsonException $exception) {
                 $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
 
@@ -2392,7 +2401,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $valid = true;
             try {
-                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+                $value = json_decode($raw, $this->associative, 512, $this->decodeFlags);
             } catch (JsonException $exception) {
                 $this->handOverInvalidItem($exception, $raw, $valueOffset, $index, $filePath);
                 $valid = false;
@@ -2741,7 +2750,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             }
 
             try {
-                $value = json_decode($raw, $this->associative, 512, JSON_THROW_ON_ERROR);
+                $value = json_decode($raw, $this->associative, 512, $this->decodeFlags);
             } catch (JsonException $exception) {
                 $this->handOverInvalidItem($exception, $raw, $valueOffset, null, $filePath);
 
@@ -3494,7 +3503,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 $raw = substr($stream->buf, $start, $length);
                 try {
-                    $value = json_decode($raw, $associative ?? $this->associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
+                    $value = json_decode($raw, $associative ?? $this->associative, max(1, $maxDepth), $this->decodeFlags);
                 } catch (JsonException) {
                     return false;
                 }
@@ -3594,7 +3603,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             try {
                 $raw = substr($stream->buf, $start, $length);
-                $values = json_decode('[' . $raw . ']', $associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
+                $values = json_decode('[' . $raw . ']', $associative, max(1, $maxDepth), $this->decodeFlags);
             } catch (JsonException) {
                 return null;
             }
@@ -3681,7 +3690,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             $raw = substr($stream->buf, $start, $length);
             try {
-                $decoded = json_decode('{' . $raw . '}', $associative, max(1, $maxDepth), JSON_THROW_ON_ERROR);
+                $decoded = json_decode('{' . $raw . '}', $associative, max(1, $maxDepth), $this->decodeFlags);
             } catch (JsonException) {
                 return null;
             }
@@ -3802,7 +3811,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     private function decodeScannedValue(string $rawValue, string $filePath, JsonStream|null $stream = null): mixed
     {
         try {
-            return json_decode($rawValue, $this->associative, 512, JSON_THROW_ON_ERROR);
+            return json_decode($rawValue, $this->associative, 512, $this->decodeFlags);
         } catch (JsonException $exception) {
             throw new InvalidArgumentException(
                 $this->invalidJsonMessage($filePath, $exception->getMessage(), $stream),
@@ -4250,7 +4259,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         try {
             // The same flag the items were produced with: a chunk written from `stdClass` items and read
         // back as arrays would make `tempChunkDir` quietly change what a read returns.
-        $decodedChunk = json_decode($content, $this->associative, self::TEMP_CHUNK_DEPTH, JSON_THROW_ON_ERROR);
+        $decodedChunk = json_decode($content, $this->associative, self::TEMP_CHUNK_DEPTH, $this->decodeFlags);
         } catch (JsonException $exception) {
             throw new RuntimeException(sprintf('Invalid temporary chunk file "%s".', $chunkFile), 0, $exception);
         }

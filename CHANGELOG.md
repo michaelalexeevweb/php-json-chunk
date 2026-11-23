@@ -3,6 +3,20 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.17.0 — 2026-11-23
+
+### Added
+
+- **`bigIntAsString`**, a constructor option: an integer bigger than PHP's — a 20-digit id, an amount in the smallest unit — comes back as a string with every digit, instead of a float that has lost the last of them. It reaches every read: a list or an object, a run decoded at once, a wildcard, `**`, `readPaths()`, `getValue()`, temporary chunk files. Integers that fit stay integers.
+
+### Tests
+
+- `count()`, `getNth()`, `getLast()` and an offset are checked over long documents, where the elements they pass over go by in runs: the count, the keys, which element is the nth or the last, a repeated key at the end, and a broken element — refused at its own byte, or handed over and left out of the count.
+
+### Not done, measured
+
+- **Passing over elements without decoding them** — for `count()`, `getNth()`, `getLast()` and an offset — was built and dropped. The elements still have to be checked, so that a broken one is refused as before, and `json_validate()` checks 20 MB in 92 ms where `json_decode()` decodes them in 124 ms: nearly all of the time is the parsing both do. Built on `json_validate()`, `count()` took 149 ms against 142 ms decoding. Only not checking the passed-over elements at all would be faster — about 3× — and that would count a broken document instead of refusing it.
+
 ## 1.16.0 — 2026-11-23
 
 ### Faster
