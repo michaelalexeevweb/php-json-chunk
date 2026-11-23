@@ -10,6 +10,10 @@ use Iterator;
 use PhpJsonChunk\Contract\JsonSourceInterface;
 use RuntimeException;
 
+/**
+ * The reader's methods, for type declarations. The interface grows in minor releases as the reader
+ * does: to change what a reader does, wrap JsonChunkReader rather than implement this yourself.
+ */
 interface JsonChunkReaderInterface
 {
     /**

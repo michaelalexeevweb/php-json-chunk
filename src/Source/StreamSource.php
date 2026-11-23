@@ -13,6 +13,10 @@ use PhpJsonChunk\Contract\JsonSourceInterface;
  * The reader never seeks, so a stream that can only be read once is enough. The handle belongs to
  * whoever opened it — this does not close it, because a caller who passed `php://input` or a socket
  * rarely means to hand over ownership of it.
+ *
+ * The stream must be blocking — what fopen() and most PHP streams are. A non-blocking socket returns
+ * nothing when the next packet has not arrived yet, and that reads as the end of the document. Wait
+ * for data yourself and hand the pieces to IterableSource instead.
  */
 final class StreamSource implements JsonSourceInterface
 {

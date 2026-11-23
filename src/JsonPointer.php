@@ -16,8 +16,11 @@ use InvalidArgumentException;
  * - `-` is every element of a list, as JsonMachine reads it (the RFC uses it only for writing);
  * - `''` is the whole document.
  *
- * One limit is this library's, not the pointer's: a segment `*` or `**` keeps its meaning here — a
- * wildcard — so a member literally named `*` cannot be reached, by a pointer or otherwise.
+ * Two limits are this library's, not the pointer's. A segment `*` or `**` keeps its meaning here — a
+ * wildcard — so a member literally named `*` cannot be reached, by a pointer or otherwise. And `-` is
+ * read as every element wherever it stands: the RFC gives it that meaning only in a list, so on an
+ * object it would name a member called `-` — here it walks every member instead, and such a member
+ * cannot be reached on its own.
  */
 final class JsonPointer
 {

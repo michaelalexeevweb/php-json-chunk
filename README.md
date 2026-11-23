@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^1.18.0
+composer require michaelalexeevweb/php-json-chunk:^1.18.1
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -315,7 +315,9 @@ be read once, in order, is enough. A source names itself in complaints, so a fai
 traceable when there is no path to point at.
 
 A bare `php://` or `http://` string is still refused: pass it as a `StreamSource` instead, so it is
-clear that a stream is what you meant.
+clear that a stream is what you meant. The stream must be blocking, as `fopen()` gives it: a
+non-blocking socket returns nothing before its next packet, and that reads as the end of the document —
+wait for the data yourself and hand the pieces to an `IterableSource`.
 
 *(Earlier versions of this file said wrappers were refused because the reader "seeks and re-reads
 within the file". It never did. The restriction was `is_file()`, and it is gone.)*
@@ -422,8 +424,9 @@ foreach ($reader->readGenerator($orders, keyPath: JsonPointer::segments('/orders
 ```
 
 `~1` is a slash and `~0` a tilde, as the RFC has it; `-` is every element of a list, as JsonMachine reads
-it; `''` is the whole document. A segment `*` or `**` keeps its wildcard meaning, so a member literally
-named `*` stays out of reach — by a pointer or otherwise.
+it; `''` is the whole document. Two limits are this library's: a segment `*` or `**` keeps its wildcard
+meaning, so a member literally named `*` stays out of reach, by a pointer or otherwise; and `-` is every
+element wherever it stands, so on an object it walks every member rather than naming one called `-`.
 
 ### Several paths in one pass
 

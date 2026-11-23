@@ -86,12 +86,15 @@ final class JsonStream
     public int $fastMisses = 0;
 
     /**
-     * Where a run — several entries decoded at once — may next be tried: past the window the last
-     * failed run looked at. A run that failed is not tried again over the same bytes, however often a
-     * single entry read fast in between clears $fastMisses — or every entry of a bad stretch would
-     * search the same kilobytes again.
+     * Where a run — several entries decoded at once — may next be tried, by the kind of run: past the
+     * window the last failed run of that kind looked at. A run that failed is not tried again over the
+     * same bytes, however often a single entry read fast in between clears $fastMisses — or every entry
+     * of a bad stretch would search the same kilobytes again. By kind, so that a run of a nested map's
+     * members that fails does not keep the list around it from its own runs.
+     *
+     * @var array<string, int>
      */
-    public int $noRunBefore = 0;
+    public array $noRunBefore = [];
 
     /** Null once the read is over, so a closed stream reads as end of file rather than as an error. */
     private JsonSourceInterface|null $source;
@@ -147,7 +150,7 @@ final class JsonStream
         $this->bytesBeforeBuffer += $this->bufLen;
         $this->nextHit = [];
         $this->fastMisses = 0;
-        $this->noRunBefore = 0;
+        $this->noRunBefore = [];
         $this->buf = $chunk;
         $this->bufLen = strlen($chunk);
         $this->bufPos = $startPos;
@@ -177,7 +180,7 @@ final class JsonStream
         $offset = $this->offset();
         $this->nextHit = [];
         $this->fastMisses = 0;
-        $this->noRunBefore = 0;
+        $this->noRunBefore = [];
         $this->buf = implode('', array_reverse($this->charBuffer)) . substr($this->buf, $this->bufPos);
         $this->bufLen = strlen($this->buf);
         $this->bufPos = 0;

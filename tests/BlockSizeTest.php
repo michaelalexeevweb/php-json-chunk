@@ -52,7 +52,9 @@ final class BlockSizeTest extends TestCase
 
         $large = [];
         for ($i = 0; $i < 12; $i++) {
-            $large[] = ['id' => $i, 'rows' => array_fill(0, 4000, ['k' => 'value ' . $i])];
+            // Size from one long string, not thousands of small arrays: the test is about bytes on the
+            // way in, and a PHP array of small arrays costs hundreds of bytes for each.
+            $large[] = ['id' => $i, 'rows' => array_fill(0, 10, ['k' => 'value ' . $i]), 'pad' => str_repeat('p', 60_000)];
         }
         $asked = $this->blocksAskedFor((string)json_encode($large));
         self::assertSame(65536, $asked[0]);
@@ -60,7 +62,7 @@ final class BlockSizeTest extends TestCase
         self::assertLessThanOrEqual(1048576, max($asked));
 
         // Elements of about 600 KB would want a 2 MB block; Auto stops at 1 MB.
-        $huge = [['rows' => array_fill(0, 60000, ['k' => 'v'])], ['rows' => array_fill(0, 60000, ['k' => 'v'])], 1];
+        $huge = [['pad' => str_repeat('h', 600_000)], ['pad' => str_repeat('h', 600_000)], 1];
         self::assertSame(1048576, max($this->blocksAskedFor((string)json_encode($huge))));
     }
 
@@ -115,7 +117,7 @@ final class BlockSizeTest extends TestCase
         }
         $large = [];
         for ($i = 0; $i < 30; $i++) {
-            $large[] = ['id' => $i, 'rows' => array_fill(0, 300 + 100 * $i, ['k' => 'v' . $i, 'n' => [$i]])];
+            $large[] = ['id' => $i, 'rows' => array_fill(0, 20, ['k' => 'v' . $i, 'n' => [$i]]), 'pad' => str_repeat('p', 3_000 + 1_000 * $i)];
         }
         $document = (string)json_encode(['small' => $small, 'large' => $large, 'tail' => ['total' => 3030]]);
         $reader = new JsonChunkReader(blockSize: $size);

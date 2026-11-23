@@ -957,7 +957,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * delimiter byte is found.  The delimiter is left in the buffer (not consumed).
      *
      */
-    private function scanPrimitive(JsonStream $stream, string $firstChar): string
+    private function scanPrimitive(JsonStream $stream, string $firstChar, string $delimiters = ",]} \t\n\r"): string
     {
         $result = $firstChar;
 
@@ -972,7 +972,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                 $stream->adopt($chunk);
             }
 
-            $spanLen = strcspn($stream->buf, ",]} \t\n\r", $stream->bufPos);
+            $spanLen = strcspn($stream->buf, $delimiters, $stream->bufPos);
             $segEnd = $stream->bufPos + $spanLen;
 
             if ($segEnd >= $stream->bufLen) {
@@ -3557,7 +3557,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        if ($start < $stream->noRunBefore) {
+        if ($start < ($stream->noRunBefore['list'] ?? 0)) {
             return null;
         }
 
@@ -3569,7 +3569,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         // Not again over the same bytes, whatever single elements read fast in between.
-        $stream->noRunBefore = min($stream->bufLen, $start + self::RUN_BYTES);
+        $stream->noRunBefore['list'] = min($stream->bufLen, $start + self::RUN_BYTES);
 
         // Brackets inside strings, say, keep every cut unbalanced; each try counts over the whole run
         // again. A run of misses stops the trying until the next block — the elements are read one at
@@ -3658,7 +3658,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        if ($start < $stream->noRunBefore) {
+        if ($start < ($stream->noRunBefore['members'] ?? 0)) {
             return null;
         }
 
@@ -3670,7 +3670,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         // Not again over the same bytes, whatever single members read fast in between.
-        $stream->noRunBefore = min($stream->bufLen, $start + self::RUN_BYTES);
+        $stream->noRunBefore['members'] = min($stream->bufLen, $start + self::RUN_BYTES);
 
         $stream->fastMisses++;
 
@@ -3729,14 +3729,26 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function topLevelMemberCount(string $raw): int
     {
+        $flat = $this->outsideContainers($raw);
+
+        return $flat === null ? -1 : substr_count($flat, ',') + 1;
+    }
+
+    /**
+     * What a run's bytes hold outside its strings and outside every container in it — the separators
+     * between its entries, and the scalars and keys among them — cut out by PCRE in C. Null when PCRE
+     * gives up, which nothing should then be taken from.
+     */
+    private function outsideContainers(string $raw): string|null
+    {
         $flat = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '', $raw);
         if (!is_string($flat)) {
-            return -1;
+            return null;
         }
 
         $flat = preg_replace('/\{(?:[^{}\[\]]++|(?R))*+\}|\[(?:[^{}\[\]]++|(?R))*+\]/', '', $flat);
 
-        return is_string($flat) ? substr_count($flat, ',') + 1 : -1;
+        return is_string($flat) ? $flat : null;
     }
 
     /**
@@ -4483,10 +4495,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $sourceName = $this->describeSource($filePath);
 
         try {
-            // Every document read, refused ones too — the number a handler is given — and the valid
-            // ones handed out, the key each comes with.
+            // Every document read, refused ones too: the key a document comes with, and the number a
+            // handler is given for one it refuses.
             $index = 0;
-            $produced = 0;
 
             while (true) {
                 $first = $this->readNonWhitespaceChar($stream);
@@ -4506,22 +4517,23 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 if ($first === '{' && ($run = $this->decodeDocumentRunFast($stream)) !== null) {
                     foreach ($run as $document) {
-                        yield $produced++ => $document;
+                        yield $index++ => $document;
                     }
-
-                    $index += count($run);
 
                     continue;
                 }
 
                 if (($first === '{' || $first === '[') && $this->decodeDocumentFast($stream, $first, $document)) {
-                    yield $produced++ => $document;
-                    $index++;
+                    yield $index++ => $document;
 
                     continue;
                 }
 
-                $raw = $this->scanValue($stream, $first, $sourceName);
+                // A number, true, false or null ends where the next document begins too — at a record
+                // separator, a bracket or a quote — not only at whitespace, as within a document.
+                $raw = $first === '{' || $first === '[' || $first === '"'
+                    ? $this->scanValue($stream, $first, $sourceName)
+                    : $this->scanPrimitive($stream, $first, ",]} \t\n\r\x1E[{\"");
                 try {
                     $document = json_decode($raw, $this->associative, 512, $this->decodeFlags);
                 } catch (JsonException $exception) {
@@ -4531,8 +4543,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                     continue;
                 }
 
-                yield $produced++ => $document;
-                $index++;
+                yield $index++ => $document;
             }
         } finally {
             $stream->close();
@@ -4590,9 +4601,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $at = strpos($stream->buf, $close, $at + 1);
         }
 
-        if ($at !== false) {
-            $stream->fastMisses++;
-        }
+        // A miss whichever way it failed — run out of block included: a bracket of the document's kind
+        // inside a string never lets the count balance, and without the miss every document of such a
+        // stretch would search to the end of the block again.
+        $stream->fastMisses++;
 
         return false;
     }
@@ -4621,14 +4633,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $start = $stream->bufPos - 1;
-        if ($start < 0 || $stream->buf[$start] !== '{' || $start < $stream->noRunBefore) {
+        if ($start < 0 || $stream->buf[$start] !== '{' || $start < ($stream->noRunBefore['documents'] ?? 0)) {
             return null;
         }
 
-        $boundary = '/\}\s*(?:\x1E\s*)?\{/';
+        // JSON's own whitespace only — not PCRE's \s, which a form feed or a vertical tab also matches.
+        $boundary = '/\}[ \t\n\r]*(?:\x1E[ \t\n\r]*)?\{/';
         $window = substr($stream->buf, $start, min($stream->bufLen, $start + self::RUN_BYTES) - $start);
         // Whatever the outcome, these bytes are not searched for a run again.
-        $stream->noRunBefore = $start + strlen($window);
+        $stream->noRunBefore['documents'] = $start + strlen($window);
         if (preg_match_all($boundary, $window, $found, PREG_OFFSET_CAPTURE) < 2) {
             return null;
         }
@@ -4639,6 +4652,14 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $inside = preg_match_all($boundary, $run);
         $stripped = preg_replace('/"(?:[^"\\\\]++|\\\\.)*+"/', '""', $run);
         if ($inside === false || $stripped === null || preg_match_all($boundary, $stripped) !== $inside) {
+            return null;
+        }
+
+        // Between the documents there may be whitespace and record separators, nothing else. A stray
+        // comma there could otherwise make up for a missing one inside a document — the count of
+        // documents would come out right, and the broken document would come out repaired.
+        $between = $this->outsideContainers($run);
+        if ($between === null || strspn($between, " \t\n\r\x1E") !== strlen($between)) {
             return null;
         }
 
@@ -4655,7 +4676,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         $stream->bufPos = $start + $cut + 1;
-        $stream->noRunBefore = 0;
+        $stream->noRunBefore['documents'] = 0;
         $stream->fastMisses = 0;
 
         return $documents;

@@ -3,6 +3,26 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 1.18.1 — 2026-11-23
+
+A code review of `src`, its findings checked one by one; the four that mattered were in `readValues()`, new in 1.18.0.
+
+### Fixed
+
+- **`readValues()` no longer goes quadratic** when documents hold a bracket of their own kind inside a string. Finding a document's end counted brackets to the end of the block, and a failure there was not counted as a miss, so every document of such a stretch searched the block again: 20 000 short documents with `"["` in them took 3.2 s, and now take a few tens of milliseconds.
+- **`readValues()` no longer repairs broken input.** A missing comma inside one document, read as a boundary, and a stray comma between two others made a run's count of documents come out right — `{"a":[{"x":1}{"y":2}]}{"b":1},{"c":1}{"d":1}` came back as four good documents, the first one fixed. A run is now decoded only when nothing but whitespace and record separators stands between its documents.
+- **Only JSON's whitespace separates documents.** A run's boundary allowed a form feed or a vertical tab — PCRE's `\s` — which JSON does not, so the same bytes were read or refused depending on whether a run formed.
+- **A number, `true`, `false` or `null` ends where the next document begins** — at a record separator, a bracket or a quote. `1` right before an RFC 7464 record separator was refused, and `1[2]` was read as `1[2`.
+- **`readValues()` keys are the documents' numbers**, the same numbers a handler is given for a refused document. They counted only the documents handed out, and after a refused one the two disagreed.
+- **A failed run keeps back only runs of its own kind** — a list's, an object's members', a sequence's documents'. A nested map's members that could not be read as a run kept the list around them from its runs too.
+- **`composer test` runs under PHP's default 128 MB.** Two test files built their large elements out of tens of thousands of small arrays; the suite needed over 128 MB and died with a fatal error wherever the limit was the default — only CI, with no limit, passed. It now peaks at 38 MB, and the tests still fail when the behaviour they pin is broken.
+
+### Documented
+
+- `JsonPointer`: `-` is every element wherever it stands, so on an object it does not name a member called `-`.
+- `StreamSource` needs a blocking stream; a non-blocking socket's pause reads as the end of the document.
+- `JsonChunkReaderInterface` grows in minor releases, as it has with `readPaths()`, `getValue()` and `readValues()`; to change what a reader does, wrap `JsonChunkReader` rather than implement the interface.
+
 ## 1.18.0 — 2026-11-23
 
 ### Added
