@@ -387,6 +387,48 @@ echo json_encode($answer);
         self::assertSame(['parts' => 4, 'ids' => range(0, 4999)], $answer);
     }
 
+    /**
+     * A worker is a copy of the caller, and ended with exit() it ran what the caller holds: the
+     * destructor of every object, every shutdown function, every output buffer — once in each worker.
+     * A PDO connection opened before the read would have been closed by each worker's copy of it, on
+     * the socket the caller shares, and buffered output printed once per worker. A worker now ends
+     * without running any of it.
+     */
+    public function testAWorkerRunsNothingOfTheCallersOnItsWayOut(): void
+    {
+        if (!function_exists('posix_kill')) {
+            self::markTestSkipped('Without posix a worker ends with exit(), and runs what exit() runs.');
+        }
+
+        $log = $this->directory . '/ended.log';
+        $answer = $this->runScript($this->listFile(1000), '
+            $log = ' . var_export($log, true) . ';
+            $connection = new class ($log) {
+                public function __construct(private string $log)
+                {
+                }
+
+                public function __destruct()
+                {
+                    file_put_contents($this->log, "destructor " . getmypid() . "\n", FILE_APPEND);
+                }
+            };
+            register_shutdown_function(static function () use ($log): void {
+                file_put_contents($log, "shutdown " . getmypid() . "\n", FILE_APPEND);
+            });
+            ob_start();
+            echo "buffered by the caller";
+            $parts = $reader->readInParallel($index, 3, fn(Generator $users): int => iterator_count($users));
+            $buffered = ob_get_clean();
+            $answer = ["parts" => $parts, "buffered" => $buffered, "parent" => getmypid(), "log" => (string)@file_get_contents($log)];
+        ');
+
+        // Anything a worker printed would stand before the JSON and fail runScript() to decode it.
+        self::assertSame([334, 333, 333], $answer['parts']);
+        self::assertSame('buffered by the caller', $answer['buffered']);
+        self::assertSame('', $answer['log'], 'a worker ran the caller\'s destructor or shutdown function');
+    }
+
     public function testAResultThatCannotBeSentFailsTheRead(): void
     {
         $answer = $this->runScript($this->listFile(100), '

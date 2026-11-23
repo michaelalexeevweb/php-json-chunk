@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.1.0
+composer require michaelalexeevweb/php-json-chunk:^2.1.1
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -604,7 +604,11 @@ $reader->forEachInParallel($index, 6, function (array $user, int $number): void 
 
 The handler runs in the workers: what it does must reach beyond the process — a database, a file, a
 queue — and a connection it uses is opened inside it, since one opened before the fork would be shared
-by every worker.
+by every worker. A worker ends without running anything of the caller's it was copied from: no
+destructors, no shutdown functions, no output buffers — so a connection the caller opened before the read
+is not closed by the workers' copies of it, and output the caller had buffered is not printed again. It
+ends itself with SIGKILL once it has sent what it has to, which needs PHP's posix extension; without it,
+a worker ends with `exit()`.
 
 To put the parts back together — a total, a count, the ids that failed a check — `readInParallel()`
 hands each worker its whole part as a generator, with the `Partition` it is reading, and gives back what

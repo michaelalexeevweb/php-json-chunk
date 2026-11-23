@@ -5153,6 +5153,12 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
             if ($pid === 0) {
                 fclose($channel[0]);
+                // The caller's output buffers came along with the fork, with what the caller had put
+                // in them: printed by every worker on its way out, unless thrown away here — the
+                // caller still has them.
+                while (ob_get_level() > 0) {
+                    ob_end_clean();
+                }
                 $status = 0;
                 try {
                     $result = $work($this->readFrom($index, $partition->offset, $partition->limit), $partition);
@@ -5174,7 +5180,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
                 fclose($channel[1]);
 
-                exit($status);
+                self::endWorker($status);
             }
 
             fclose($channel[1]);
@@ -5190,6 +5196,23 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         ksort($results);
 
         return $results;
+    }
+
+    /**
+     * Ends a worker without running anything of the caller's it is a copy of. exit() would run the
+     * destructor of every object the caller holds and every shutdown function it registered — once in
+     * each worker: a PDO connection opened before the read would be closed by each worker's copy of
+     * it, on the very socket the caller goes on using. SIGKILL ends the process where it stands; the
+     * worker has said by then whether it finished, so its exit status is not needed. Without posix it
+     * falls back to exit().
+     */
+    private static function endWorker(int $status): never
+    {
+        if (function_exists('posix_kill') && function_exists('posix_getpid')) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+
+        exit($status);
     }
 
     /**
@@ -5209,8 +5232,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             $message = (string)stream_get_contents($channel);
             fclose($channel);
             pcntl_waitpid($pid, $status);
-            $finished = pcntl_wifexited($status) && pcntl_wexitstatus($status) === 0
-                && str_starts_with($message, self::WORKER_DONE);
+            // A worker that finished says so, and then ends by SIGKILL — or by exit(0), without posix.
+            $ended = pcntl_wifexited($status)
+                ? pcntl_wexitstatus($status) === 0
+                : pcntl_wifsignaled($status) && pcntl_wtermsig($status) === SIGKILL;
+            $finished = $ended && str_starts_with($message, self::WORKER_DONE);
             if (!$finished) {
                 $failures[] = sprintf('worker %d: %s', $part, $message !== '' && !str_starts_with($message, self::WORKER_DONE) ? $message : 'ended without finishing');
 

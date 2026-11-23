@@ -3,6 +3,12 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.1.1 — 2026-11-23
+
+### Fixed
+
+- **A worker ran the caller's destructors, shutdown functions and output buffers.** A forked worker is a copy of the caller, and it ended with `exit()`, which ran all three in every worker: the destructor of every object the caller held, every shutdown function it had registered, and every output buffer it had open, printed. A PDO connection opened before `readInParallel()` or `forEachInParallel()` would have been closed by each worker's copy of it — on the very socket the caller goes on using — and anything the caller had buffered was printed once per worker. A worker now throws away the copied buffers when it starts and ends itself with SIGKILL once it has sent its result, so nothing of the caller's runs; finishing is told by the mark it sends, as before. Without PHP's posix extension it still ends with `exit()`. Found by a test with three workers: the destructor and the shutdown function ran four times, the buffered text was printed four times.
+
 ## 2.1.0 — 2026-11-23
 
 ### Performance
