@@ -26,10 +26,24 @@ enum Workers
     {
         static $cores = null;
 
-        return $cores ??= self::coresFrom(
+        if ($cores !== null) {
+            return $cores;
+        }
+
+        // cgroup v2: the process's own group, from /proc/self/cgroup, and every group above it — a
+        // limit may be set on any of them, a systemd slice's or a container's; the root alone is all
+        // there is inside a container with a cgroup namespace of its own.
+        $cpuMax = [];
+        $cpuset = [];
+        foreach (self::groups() as $group) {
+            $cpuMax[] = self::read('/sys/fs/cgroup' . $group . '/cpu.max');
+            $cpuset[] = self::read('/sys/fs/cgroup' . $group . '/cpuset.cpus.effective');
+        }
+
+        return $cores = self::coresFrom(
             cpuinfo: self::read('/proc/cpuinfo'),
-            cpuMax: self::read('/sys/fs/cgroup/cpu.max'),
-            cpuset: self::read('/sys/fs/cgroup/cpuset.cpus.effective'),
+            cpuMax: $cpuMax,
+            cpuset: [...$cpuset, self::read('/sys/fs/cgroup/cpuset/cpuset.effective_cpus')],
             cfsQuota: self::read('/sys/fs/cgroup/cpu/cpu.cfs_quota_us'),
             cfsPeriod: self::read('/sys/fs/cgroup/cpu/cpu.cfs_period_us'),
             sysctl: PHP_OS_FAMILY === 'Darwin' ? self::sysctl() : null,
@@ -37,15 +51,40 @@ enum Workers
     }
 
     /**
-     * The count from what the system says, each null when it says nothing. Apart from cores() so that
-     * a test can hand it what a container's files hold.
+     * The cgroup v2 groups of this process, its own first, up to the root: `/a/b` gives `/a/b`, `/a`
+     * and ``.
+     *
+     * @return array<int, string>
+     */
+    private static function groups(): array
+    {
+        $groups = [''];
+        $self = self::read('/proc/self/cgroup');
+        if ($self !== null && preg_match('/^0::(\/\S*)$/m', $self, $line) === 1) {
+            $path = rtrim($line[1], '/');
+            while ($path !== '' && !str_contains($path, '..')) {
+                $groups[] = $path;
+                $path = substr($path, 0, (int)strrpos($path, '/'));
+            }
+        }
+
+        return $groups;
+    }
+
+    /**
+     * The count from what the system says, each null when it says nothing; a limit given for several
+     * cgroups — a process's own and those above it — is the narrowest of them. Apart from cores() so
+     * that a test can hand it what a container's files hold.
+     *
+     * @param string|array<int, string|null>|null $cpuMax
+     * @param string|array<int, string|null>|null $cpuset
      *
      * @internal
      */
     public static function coresFrom(
         string|null $cpuinfo = null,
-        string|null $cpuMax = null,
-        string|null $cpuset = null,
+        string|array|null $cpuMax = null,
+        string|array|null $cpuset = null,
         string|null $cfsQuota = null,
         string|null $cfsPeriod = null,
         int|null $sysctl = null,
@@ -61,8 +100,10 @@ enum Workers
         }
 
         // cgroup v2: "max 100000" is no limit; "200000 100000" is two CPUs.
-        if ($cpuMax !== null && preg_match('/^(\d+)\s+(\d+)/', trim($cpuMax), $quota) === 1 && (int)$quota[2] > 0) {
-            $counts[] = (int)ceil((int)$quota[1] / (int)$quota[2]);
+        foreach ((array)$cpuMax as $max) {
+            if ($max !== null && preg_match('/^(\d+)\s+(\d+)/', trim($max), $quota) === 1 && (int)$quota[2] > 0) {
+                $counts[] = (int)ceil((int)$quota[1] / (int)$quota[2]);
+            }
         }
 
         // cgroup v1: a quota of -1 is no limit.
@@ -71,9 +112,13 @@ enum Workers
         }
 
         // The cores it may run on: "0-3,8,10-11" is seven.
-        if ($cpuset !== null && trim($cpuset) !== '') {
+        foreach ((array)$cpuset as $set) {
+            if ($set === null || trim($set) === '') {
+                continue;
+            }
+
             $allowed = 0;
-            foreach (explode(',', trim($cpuset)) as $range) {
+            foreach (explode(',', trim($set)) as $range) {
                 $ends = explode('-', $range);
                 $allowed += count($ends) === 2 ? (int)$ends[1] - (int)$ends[0] + 1 : 1;
             }

@@ -177,6 +177,30 @@ final class JsonStream
     }
 
     /**
+     * Reads the next block onto what is left of this one, from $from on — what is before it is
+     * dropped, so the buffer holds no more than the rest of one block and the next. For a value that
+     * straddles two blocks, to be read the fast way rather than character by character. False at end
+     * of file, with the buffer as it was.
+     */
+    public function extend(int $from): bool
+    {
+        $chunk = $this->readBlock();
+        if ($chunk === null) {
+            return false;
+        }
+
+        $this->bytesBeforeBuffer += $from;
+        $this->nextHit = [];
+        $this->fastMisses = 0;
+        $this->noRunBefore = [];
+        $this->buf = substr($this->buf, $from) . $chunk;
+        $this->bufLen = strlen($this->buf);
+        $this->bufPos -= $from;
+
+        return true;
+    }
+
+    /**
      * How many bytes of the document have been consumed — the position a complaint should name.
      *
      * Characters pushed back have been read but not consumed, so they are subtracted: the offset must

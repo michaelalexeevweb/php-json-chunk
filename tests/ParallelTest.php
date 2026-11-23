@@ -627,6 +627,35 @@ file_put_contents(' . var_export($this->directory . '/answer.json', true) . ', j
         self::assertSame(5000, $answer['read']);
     }
 
+    /**
+     * Found in a review of 2.3.0: the check for pcntl moved to where indexValues() shares it, and
+     * there it asks only when more than one worker is wanted — but a read in parallel forks even one.
+     * Without pcntl, one worker, or Workers::Auto on a machine of one core, ended in an Error from the
+     * missing pcntl_fork() instead of saying what is missing.
+     */
+    public function testOneWorkerWithoutPcntlIsRefusedWithAReason(): void
+    {
+        $path = $this->listFile(3);
+        $script = $this->directory . '/no-pcntl.php';
+        file_put_contents($script, '<?php
+require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';
+$reader = new PhpJsonChunk\JsonChunkReader();
+$index = $reader->index(' . var_export($path, true) . ', "users");
+foreach ([1, 2] as $workers) {
+    try {
+        $reader->readInParallel($index, $workers, fn(Generator $users): int => iterator_count($users));
+        echo "ran\n";
+    } catch (Throwable $exception) {
+        echo get_class($exception), ": ", $exception->getMessage(), "\n";
+    }
+}
+');
+
+        $output = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d disable_functions=pcntl_fork,pcntl_waitpid ' . escapeshellarg($script) . ' 2>&1');
+
+        self::assertSame(2, substr_count($output, 'RuntimeException: readInParallel() needs pcntl'), $output);
+    }
+
     public function testAResultThatCannotBeSentFailsTheRead(): void
     {
         $answer = $this->runScript($this->listFile(100), '

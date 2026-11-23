@@ -45,6 +45,10 @@ final class JsonIndex
             throw new InvalidArgumentException('Not an index: the count is negative.');
         }
 
+        if ($every !== null && $every < 1) {
+            throw new InvalidArgumentException('Not an index: every must be at least 1.');
+        }
+
         if ($count > 0 && ($checkpoints[0][0] ?? null) !== 0) {
             throw new InvalidArgumentException('Not an index: there is no checkpoint for the first entry.');
         }

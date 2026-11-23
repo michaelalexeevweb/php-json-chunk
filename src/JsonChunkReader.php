@@ -4670,6 +4670,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         $stream ??= $this->openFile($filePath);
         $sourceName = $this->describeSource($filePath);
         $nextCheckpoint = $firstKey;
+        // Read once, not at every line: a property read at every line was 5 % of the read.
+        $associative = $this->associative;
+        $flags = $this->decodeFlags;
+        $limit = (int)$this->maxElementBytes;
+        $limited = $this->maxElementBytes !== null && $this->maxElementBytes < self::LINES_BYTES;
 
         try {
             // Every document read, refused ones too: the key a document comes with, and the number a
@@ -4703,19 +4708,70 @@ final class JsonChunkReader implements JsonChunkReaderInterface
                     $nextCheckpoint = $index + $every;
                 }
 
-                // A batch is decoded at once, and may run past $until: cut where it does.
-                // Indexing, the checkpoints due inside a batch of lines are found in it, or a block of
-                // short lines would leave a single checkpoint where $every asked for dozens.
-                $due = [];
-                if (($lines = $this->decodeLinesFast($stream, $every, $nextCheckpoint - $index, $due)) !== null
-                    || ($first === '{' && ($lines = $this->decodeDocumentRunFast($stream)) !== null)) {
-                    foreach ($due as [$within, $bytes]) {
-                        $checkpoints[] = [$index + $within, $valueOffset + $bytes];
-                        $nextCheckpoint = $index + $within + $every;
+                // Lines are decoded as they are handed on, not gathered first: a gathered batch cost a
+                // pass over it of its own, 7 % of the read.
+                if (($batch = $this->takeLines($stream)) !== null) {
+                    [$document, $lines, $start, $end, $last] = $batch;
+                    $batchStart = $index;
+                    yield $index++ => $document;
+
+                    // No further than $until.
+                    $all = count($lines);
+                    if ($until !== null && $index + $all > $until) {
+                        $lines = array_slice($lines, 0, max(0, $until - $index));
                     }
 
-                    $past = $until !== null && $index + count($lines) > $until;
-                    foreach ($past ? array_slice($lines, 0, max(0, $until - $index)) : $lines as $document) {
+                    $taken = count($lines);
+                    $skipped = false;
+                    foreach ($lines as $number => $line) {
+                        if ($limited && strlen($line) > $limit) {
+                            $taken = $number;
+
+                            break;
+                        }
+
+                        try {
+                            $document = json_decode($line, $associative, 512, $flags);
+                        } catch (JsonException) {
+                            // Whitespace between documents — a blank line, a carriage return — is
+                            // skipped, as the scanner skips it; anything else ends the lines taken,
+                            // and is read the usual way.
+                            if (strspn($line, " \t\r") !== strlen($line)) {
+                                $taken = $number;
+
+                                break;
+                            }
+
+                            $skipped = true;
+
+                            continue;
+                        }
+
+                        yield $index++ => $document;
+                    }
+
+                    // Every line taken: up to the last newline. Fewer: those taken, and their newlines.
+                    $stream->bufPos = $end + 1 + ($taken === $all && $last !== null
+                        ? $last + 1
+                        : array_sum(array_map('strlen', array_slice($lines, 0, $taken))) + $taken);
+
+                    // Indexing, the checkpoints due inside the batch are found from the lengths of its
+                    // lines, or a block of short lines would leave one where $every asked for dozens.
+                    // Not when a blank line was skipped: the places of lines and documents part there.
+                    if ($every > 0 && !$skipped) {
+                        foreach ($this->checkpointsInLines($lines, $index - $batchStart, $end + 1 - $start, $nextCheckpoint - $batchStart, $every) as [$within, $bytes]) {
+                            $checkpoints[] = [$batchStart + $within, $valueOffset + $bytes];
+                            $nextCheckpoint = $batchStart + $within + $every;
+                        }
+                    }
+
+                    continue;
+                }
+
+                // A run is decoded at once, and may run past $until: cut where it does.
+                if ($first === '{' && ($run = $this->decodeDocumentRunFast($stream)) !== null) {
+                    $past = $until !== null && $index + count($run) > $until;
+                    foreach ($past ? array_slice($run, 0, max(0, $until - $index)) : $run as $document) {
                         yield $index++ => $document;
                     }
 
@@ -4799,9 +4855,10 @@ final class JsonChunkReader implements JsonChunkReaderInterface
     }
 
     /**
-     * Documents one to a line, as NDJSON has them: from the document just entered, every whole line in
-     * the block that json_decode() takes whole is a document, up to the first that it does not take.
-     * Null, with the stream untouched, when not even the first line is one.
+     * Documents one to a line, as NDJSON has them: the line of the document just entered, decoded, and
+     * the whole lines after it in the block, split in C, for the caller to decode as it hands them on —
+     * each a document while json_decode() takes it whole. Null, with the stream untouched, when the
+     * first line is not one. The caller puts the stream past the lines it took.
      *
      * A line is only ever taken where a document starts — the first at the document just entered, each
      * next one right after a line that was a whole document — so a line that decodes is that document,
@@ -4809,15 +4866,11 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * documents on one line do not decode as one. Each line is decoded by itself, never joined to the
      * next, so no line can make up for what another lacks.
      *
-     * With $every, the documents due a checkpoint — the $firstDue-th of the batch, then every
-     * $every-th — are put in $due as `[their place in the batch, their distance in bytes from the
-     * first]`; left empty when a blank line was skipped, as the places of lines and documents part.
-     *
-     * @param array<int, array{0: int, 1: int}> $due
-     *
-     * @return array<int, mixed>|null
+     * @return array{0: mixed, 1: array<int, string>, 2: int, 3: int, 4: int|null}|null the first
+     *         document, the lines after it, where the first starts and ends, and where the last of
+     *         the lines ends, counted from just after the first
      */
-    private function decodeLinesFast(JsonStream $stream, int $every = 0, int $firstDue = 0, array &$due = []): array|null
+    private function takeLines(JsonStream $stream): array|null
     {
         if ($stream->charBuffer !== []) {
             return null;
@@ -4831,8 +4884,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         // The first line alone, before anything is split: a pretty-printed document's first line is
         // `{` or `[`, and every document of such a file comes this way. Decoded without the exception,
         // which costs more than the decode when it is thrown at every document.
-        $until = min($stream->bufLen, $start + self::LINES_BYTES);
         $end = strpos($stream->buf, "\n", $start);
+        if ($end === false && $start > 0 && $stream->extend($start)) {
+            // The line runs into the next block: the next block read onto it, so that it is taken
+            // here rather than character by character — a line at every block's end otherwise.
+            $start = 0;
+            $end = strpos($stream->buf, "\n");
+        }
+
+        $until = min($stream->bufLen, $start + self::LINES_BYTES);
         $limited = $this->maxElementBytes !== null && $this->maxElementBytes < self::LINES_BYTES;
         if ($end === false || $end >= $until || ($limited && $end - $start > $this->maxElementBytes)) {
             // Not a whole line from here within reach: not tried again before the line's end.
@@ -4849,66 +4909,43 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             return null;
         }
 
-        $documents = [$document];
-        $at = $end + 1;
-
-        // The lines after it that end within reach: cut at the last newline, split in C.
-        $reach = substr($stream->buf, $at, $until - $at);
-        $last = strrpos($reach, "\n");
-        if ($last === false) {
-            $stream->bufPos = $at;
-
-            return $documents;
+        // The lines after it that end within reach: cut at the last newline before $until, found in
+        // the buffer itself, and split in C — one copy of them, not two.
+        $last = $until > $end + 1 ? strrpos($stream->buf, "\n", $until - $stream->bufLen - 1) : false;
+        if ($last === false || $last <= $end) {
+            return [$document, [], $start, $end, null];
         }
 
-        $lines = explode("\n", substr($reach, 0, $last));
-        $all = count($lines);
-        $taken = $all;
-        $skipped = false;
-        foreach ($lines as $number => $line) {
-            if ($limited && strlen($line) > $this->maxElementBytes) {
-                $taken = $number;
+        return [$document, explode("\n", substr($stream->buf, $end + 1, $last - $end - 1)), $start, $end, $last - $end - 1];
+    }
 
-                break;
-            }
-
-            try {
-                $documents[] = json_decode($line, $this->associative, 512, $this->decodeFlags);
-            } catch (JsonException) {
-                // Whitespace between documents — a blank line, a carriage return — is skipped, as the
-                // scanner skips it; anything else ends the lines taken.
-                if (strspn($line, " \t\r") !== strlen($line)) {
-                    $taken = $number;
-
-                    break;
-                }
-
-                $skipped = true;
-            }
+    /**
+     * The checkpoints due in a batch of lines — its $firstDue-th document, then every $every-th — as
+     * `[place in the batch, distance in bytes from its first document]`. Document $p of the batch is
+     * line $p - 1 after the first: its distance is the first line's and those of the lines before it,
+     * each with its newline, summed in C a stretch at a time.
+     *
+     * @param array<int, string> $lines the lines after the first
+     *
+     * @return array<int, array{0: int, 1: int}>
+     */
+    private function checkpointsInLines(array $lines, int $documents, int $firstLine, int $firstDue, int $every): array
+    {
+        if ($firstDue >= $documents) {
+            return [];
         }
 
-        if ($every > 0 && !$skipped && $firstDue < count($documents)) {
-            // Document $p of the batch is line $p - 1 after the first: its distance from the first is
-            // the first line, and the lines before it, each with its newline.
-            // Summed in C, a stretch between two checkpoints at a time.
-            $lengths = array_map('strlen', array_slice($lines, 0, count($documents) - 1));
-            $distance = $end + 1 - $start;
-            $counted = 1;
-            for ($place = max(1, $firstDue); $place < count($documents); $place += $every) {
-                $distance += array_sum(array_slice($lengths, $counted - 1, $place - $counted)) + $place - $counted;
-                $counted = $place;
-                $due[] = [$place, $distance];
-            }
+        $lengths = array_map('strlen', array_slice($lines, 0, $documents - 1));
+        $due = [];
+        $distance = $firstLine;
+        $counted = 1;
+        for ($place = max(1, $firstDue); $place < $documents; $place += $every) {
+            $distance += array_sum(array_slice($lengths, $counted - 1, $place - $counted)) + $place - $counted;
+            $counted = $place;
+            $due[] = [$place, $distance];
         }
 
-        // Every line taken: up to the last newline. Fewer: the lengths of those taken, and their newlines.
-        $at += $taken === $all
-            ? $last + 1
-            : array_sum(array_map('strlen', array_slice($lines, 0, $taken))) + $taken;
-
-        $stream->bufPos = $at;
-
-        return $documents;
+        return $due;
     }
 
     /**
@@ -5238,8 +5275,15 @@ final class JsonChunkReader implements JsonChunkReaderInterface
 
         $total = 0;
         $checkpoints = [];
-        /** @var array<int, array{0: int, 1: array<int, array{0: int, 1: int}>}|null> $stretches */
-        $stretches = $this->forkTasks($tasks, true);
+        // A worker that could not be started, or died — out of memory — leaves the index to the one
+        // pass, as anything else the workers could not settle does.
+        try {
+            /** @var array<int, array{0: int, 1: array<int, array{0: int, 1: int}>}|null> $stretches */
+            $stretches = $this->forkTasks($tasks, true);
+        } catch (RuntimeException) {
+            return null;
+        }
+
         foreach ($stretches as $stretch) {
             if ($stretch === null) {
                 return null;
@@ -5524,7 +5568,8 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      */
     private function runInParallel(JsonIndex $index, int|Workers $workers, string $method, callable $work, bool $send): array
     {
-        $workers = $this->resolveWorkers($workers, $method);
+        // A read in parallel forks even one worker, so it needs pcntl whatever the number.
+        $workers = $this->resolveWorkers($workers, $method, forksOne: true);
 
         // Checked once here, before anything is forked: a changed file is refused by every worker anyway.
         $this->readFrom($index, 0, 1);
@@ -5543,7 +5588,7 @@ final class JsonChunkReader implements JsonChunkReaderInterface
      * @throws InvalidArgumentException
      * @throws RuntimeException
      */
-    private function resolveWorkers(int|Workers $workers, string $method): int
+    private function resolveWorkers(int|Workers $workers, string $method, bool $forksOne = false): int
     {
         if ($workers === Workers::Auto) {
             $workers = Workers::cores();
@@ -5561,9 +5606,9 @@ final class JsonChunkReader implements JsonChunkReaderInterface
             ));
         }
 
-        if ($workers > 1 && (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid'))) {
+        if (($workers > 1 || $forksOne) && (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid'))) {
             throw new RuntimeException(
-                $method . '() needs pcntl for more than one worker, which PHP has on the command line on Linux and macOS. '
+                $method . '() needs pcntl' . ($forksOne ? '' : ' for more than one worker') . ', which PHP has on the command line on Linux and macOS. '
                 . 'Split the work with JsonIndex::partitions() and give the parts to your own workers.',
             );
         }

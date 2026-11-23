@@ -3,6 +3,21 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.3.1 — 2026-11-23
+
+### Performance
+
+- **NDJSON read 10 % faster, indexed 9 % faster.** Three costs found by measuring each against `fgets()` + `json_decode()` on a million lines: a line cut by the end of a 64 KB block went the slow way, a character at a time, after the fast ways had each been tried — one line every block, 6 % of the read; the block is now read onto the rest of the line instead. The lines of a block were decoded into an array and then handed on from it, a pass of its own, 7 %; they are now decoded as they are handed on. And the reader's options were read at every line, 5 %; once now. A million lines: 517 ms → 467 ms, against 410 ms for the plain loop — what is left is the generator, the same lines decoded without being handed on taking 420 ms. Indexing them 525 ms → 476 ms; pretty-printed documents unchanged. Measured old against new in turns, each in a process of its own.
+
+### Fixed
+
+Found in a review of 2.2.0 and 2.3.0; each has a test that fails on 2.3.0.
+
+- **A read in parallel without pcntl says so, with one worker too.** In 2.3.0 the check for pcntl moved to where `indexValues()` shares it, and there it asks only when more than one worker is wanted; but `readInParallel()` and `forEachInParallel()` fork even one. Without pcntl — Windows, a web SAPI — `workers: 1`, or `Workers::Auto` on a machine of one core, ended in `Error: Call to undefined function pcntl_fork()` instead of the `RuntimeException` that says what is missing.
+- **`Workers::cores()` finds a limit below the cgroup root.** Only the root's `cpu.max` was read, which is the container's own only inside a container with a cgroup namespace of its own; in one sharing the host's — `docker run --cgroupns=host --cpus=2` — or under a systemd slice with a CPU quota, the limit sits on the process's own group, and 2.3.0 gave the host's 12 cores where 2 were allowed. The process's group is read from `/proc/self/cgroup`, and the limits of it and every group above it are taken, the narrowest winning; cgroup v1's cpuset too.
+- **An index saved with `every` below 1 is refused.** `extendIndex()` made no checkpoint with it, and failed on its own index with "no checkpoint for the first entry".
+- **A worker that dies while indexing leaves the index to the one pass.** A worker of `indexValues($path, workers: N)` that could not be started, or died — out of memory — failed the whole index; it now falls back to the one pass, as anything else the workers cannot settle does. Not covered by a test: a worker cannot be made to die there reliably.
+
 ## 2.3.0 — 2026-11-23
 
 ### Added

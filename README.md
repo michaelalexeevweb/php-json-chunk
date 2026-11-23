@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.3.0
+composer require michaelalexeevweb/php-json-chunk:^2.3.1
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.
@@ -1257,13 +1257,15 @@ between them, or each after an RFC 7464 record separator; `limit`, `offset`, `on
 
 | 200 000 documents (16 MB one to a line) | time |
 |---|---:|
-| one per line, `fgets()` + `json_decode()` | 84 ms |
-| one per line, `readValues()` | 100 ms |
-| pretty-printed one after another, `readValues()` | 180 ms |
+| one per line, `fgets()` + `json_decode()` | 85 ms |
+| one per line, `readValues()` | 93 ms |
+| pretty-printed one after another, `readValues()` | 188 ms |
 
 Measured with `php bin/benchmark-values.php`. Lines are taken a block at a time: split at the newlines in
 C, each decoded by itself, and taken as a document only where one starts and only when `json_decode()`
-takes the whole line — anything else is read as before. Since 2.1.0; it was 182 ms before.
+takes the whole line — anything else is read as before. Since 2.1.0; it was 182 ms before. What is
+left between it and the plain loop is the generator: each document handed on through `foreach` — the
+same lines decoded without being handed on take as long as `fgets()`.
 
 For a file that is strictly one document per line, the plain loop is still a little faster and needs
 nothing:

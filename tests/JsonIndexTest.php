@@ -161,6 +161,8 @@ final class JsonIndexTest extends TestCase
         yield 'an entry past the count' => [100, [[0, 1], [100, 900]], 'past'];
         yield 'none for the first entry' => [100, [[20, 400]], 'first entry'];
         yield 'a negative count' => [-1, [], 'count'];
+        // An index saved with every 0 made extendIndex() put no checkpoint back, and fail on its own.
+        yield 'every zero' => [100, [[0, 1]], 'every must be at least 1'];
     }
 
     /**
@@ -176,7 +178,7 @@ final class JsonIndexTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage($message);
 
-        JsonIndex::fromJson((string)json_encode(['path' => '/x.json', 'keyPath' => null, 'container' => '[', 'count' => $count, 'checkpoints' => $checkpoints, 'size' => 10, 'modified' => 1]));
+        JsonIndex::fromJson((string)json_encode(['path' => '/x.json', 'keyPath' => null, 'container' => '[', 'count' => $count, 'checkpoints' => $checkpoints, 'size' => 10, 'modified' => 1, 'every' => $message === 'every must be at least 1' ? 0 : 1000]));
     }
 
     /**

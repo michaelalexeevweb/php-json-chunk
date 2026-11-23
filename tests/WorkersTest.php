@@ -33,6 +33,11 @@ final class WorkersTest extends TestCase
         yield 'a cpuset' => [['cpuinfo' => $cpuinfo, 'cpuset' => "0-3,8,10-11\n"], 7];
         yield 'a cpuset narrower than the quota' => [['cpuinfo' => $cpuinfo, 'cpuMax' => "800000 100000", 'cpuset' => '0-2'], 3];
         yield 'a quota narrower than the cpuset' => [['cpuinfo' => $cpuinfo, 'cpuMax' => "100000 100000", 'cpuset' => '0-7'], 1];
+        // A process in a group of its own below the root — a systemd slice, a container sharing the
+        // host's cgroup namespace — has its limit there, not at the root, which says "max".
+        yield 'a limit on the process\'s own group' => [['cpuinfo' => $cpuinfo, 'cpuMax' => ["max 100000\n", null, "200000 100000\n"]], 2];
+        yield 'a limit on a group above it' => [['cpuinfo' => $cpuinfo, 'cpuMax' => ["max 100000", "300000 100000", "max 100000"]], 3];
+        yield 'cpusets along the way' => [['cpuinfo' => $cpuinfo, 'cpuset' => ['0-63', null, '0-5']], 6];
         yield 'more than may be forked' => [['sysctl' => 1000], JsonChunkReader::MAX_WORKERS];
         yield 'files that say nothing' => [['cpuinfo' => '', 'cpuMax' => 'garbage', 'cpuset' => ' '], 1];
     }
