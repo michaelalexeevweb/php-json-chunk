@@ -440,13 +440,6 @@ file_put_contents(' . var_export($this->directory . '/answer.json', true) . ', j
      */
     public function testAWorkersFatalErrorReachesTheCaller(): void
     {
-        // The PHP 8.1 of the CI's runners ends a worker that ran out of memory with status 1 and runs
-        // no shutdown function at all, the test's own included; PHP 8.1 built from the official image
-        // runs them. Without one there is nothing to send the error with.
-        if (PHP_VERSION_ID < 80200) {
-            self::markTestSkipped('Some builds of PHP 8.1 run no shutdown function after running out of memory.');
-        }
-
         $answer = $this->runScript($this->listFile(1000), '
             // The fatal error is printed too, which is not what is tested here.
             ini_set("display_errors", "0");
@@ -467,8 +460,22 @@ file_put_contents(' . var_export($this->directory . '/answer.json', true) . ', j
         ');
 
         self::assertIsString($answer['error'] ?? null);
-        self::assertStringContainsString('worker 1: PHP Fatal error: Allowed memory size', $answer['error'], 'The process printed: ' . $this->printed);
         self::assertStringNotContainsString('worker 0', $answer['error']);
+        if (PHP_VERSION_ID >= 80200) {
+            self::assertStringContainsString('worker 1: PHP Fatal error: Allowed memory size', $answer['error'], 'The process printed: ' . $this->printed);
+
+            return;
+        }
+
+        // The PHP 8.1 of GitHub's runners ends a worker that ran out of memory with status 1 and runs
+        // no shutdown function at all, so there is nothing to send the error with; PHP 8.1 built from
+        // the official image runs them and sends it. Either way the caller is told which worker failed,
+        // and how — the reason, or how it ended.
+        self::assertMatchesRegularExpression(
+            '/worker 1: (PHP Fatal error: Allowed memory size|ended without finishing \\(exit status (1|255)\\))/',
+            $answer['error'],
+            'The process printed: ' . $this->printed,
+        );
     }
 
     /**
