@@ -660,7 +660,31 @@ foreach ([1, 2] as $workers) {
 
         $output = (string)shell_exec(escapeshellarg(PHP_BINARY) . ' -d disable_functions=pcntl_fork,pcntl_waitpid ' . escapeshellarg($script) . ' 2>&1');
 
-        self::assertSame(2, substr_count($output, 'RuntimeException: readInParallel() needs pcntl'), $output);
+        self::assertSame(2, substr_count($output, "RuntimeException: readInParallel() needs PHP's pcntl extension"), $output);
+        // Switched off, not missing: the message says which, and what to do.
+        self::assertStringContainsString('switched off by disable_functions in php.ini', $output);
+    }
+
+    /**
+     * "Needs pcntl" said nothing of why, and the causes are cured differently: each says its own.
+     *
+     * @return iterable<string, array{0: string, 1: string, 2: bool, 3: string}>
+     */
+    public static function noPcntl(): iterable
+    {
+        yield 'Windows' => ['Windows', 'cli', false, 'no process can be forked there'];
+        yield 'not installed, command line' => ['Linux', 'cli', false, 'docker-php-ext-install pcntl'];
+        yield 'not installed, a web server' => ['Linux', 'fpm-fcgi', false, 'which a web server runs (fpm-fcgi), does not have it'];
+        yield 'switched off, command line' => ['Darwin', 'cli', true, 'switched off by disable_functions in php.ini'];
+        yield 'switched off, a web server' => ['Linux', 'apache2handler', true, 'run the parallel read from a console command or a queue job'];
+    }
+
+    #[DataProvider('noPcntl')]
+    public function testWhyThereIsNoPcntlIsSaid(string $os, string $sapi, bool $loaded, string $says): void
+    {
+        $why = new \ReflectionMethod(JsonChunkReader::class, 'whyNoPcntl');
+
+        self::assertStringContainsString($says, (string)$why->invoke(null, $os, $sapi, $loaded));
     }
 
     public function testAResultThatCannotBeSentFailsTheRead(): void

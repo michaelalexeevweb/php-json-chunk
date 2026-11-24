@@ -3,6 +3,16 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.5.2 — 2026-11-24
+
+### Changed
+
+- **Without pcntl, the parallel reads say why, and what to do.** `readInParallel()`, `forEachInParallel()` and `indexValues()` with workers refused with "needs pcntl" whatever the cause, and the causes are cured differently. The message now tells them apart: PHP on Windows, which has none; not installed — `php -m` to see, `docker-php-ext-install pcntl` in the official Docker image, `--enable-pcntl` for a PHP built by hand; installed but switched off by `disable_functions`; or a web server's PHP, with the advice to run the read from a console command or a queue job. Each still ends with `JsonIndex::partitions()` as the way to split the work without it.
+
+### Documentation
+
+- **What the parallel reads need**, in the README's requirements and a section of `docs/index-and-parallel.md`: `pcntl` and `posix`, how to see whether PHP has them, where it does — the command line, Homebrew, Debian and Ubuntu, the official Docker image after `docker-php-ext-install pcntl` — and where it does not: a web request, Windows.
+
 ## 2.5.1 — 2026-11-24
 
 ### Documentation

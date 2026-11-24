@@ -160,10 +160,12 @@ Compared against:
 
 ## Install
 
-**Requirements:** PHP 8.1+
+**Requirements:** PHP 8.1+, nothing else. The parallel reads — `readInParallel()`, `forEachInParallel()`,
+`indexValues()` with workers — also need PHP's `pcntl` extension, and `posix` to end a worker cleanly:
+[what that means and how to get them](docs/index-and-parallel.md#what-the-parallel-reads-need).
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.5.1
+composer require michaelalexeevweb/php-json-chunk:^2.5.2
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.

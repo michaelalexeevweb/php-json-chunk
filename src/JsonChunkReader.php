@@ -5705,13 +5705,37 @@ final class JsonChunkReader implements JsonChunkReaderInterface
         }
 
         if (($workers > 1 || $forksOne) && (!function_exists('pcntl_fork') || !function_exists('pcntl_waitpid'))) {
-            throw new RuntimeException(
-                $method . '() needs pcntl' . ($forksOne ? '' : ' for more than one worker') . ', which PHP has on the command line on Linux and macOS. '
-                . 'Split the work with JsonIndex::partitions() and give the parts to your own workers.',
-            );
+            throw new RuntimeException(sprintf(
+                '%s() needs PHP\'s pcntl extension%s, and %s Or split the work with JsonIndex::partitions() and give the parts to workers of your own.',
+                $method,
+                $forksOne ? '' : ' for more than one worker',
+                self::whyNoPcntl(PHP_OS_FAMILY, PHP_SAPI, extension_loaded('pcntl')),
+            ));
         }
 
         return $workers;
+    }
+
+    /**
+     * Why pcntl cannot be had, and what to do about it: one message said "needs pcntl" whatever the
+     * cause, and the causes are cured differently — none on Windows, an install, a php.ini, or a
+     * console command instead of a web request.
+     */
+    private static function whyNoPcntl(string $os, string $sapi, bool $loaded): string
+    {
+        if ($os === 'Windows') {
+            return 'PHP on Windows has none: no process can be forked there.';
+        }
+
+        if ($loaded) {
+            return $sapi === 'cli'
+                ? 'it is installed, but pcntl_fork() or pcntl_waitpid() is switched off by disable_functions in php.ini: take them out of it.'
+                : sprintf('it is installed, but switched off for this PHP, which a web server runs (%s), as it usually is there: run the parallel read from a console command or a queue job.', $sapi);
+        }
+
+        return $sapi === 'cli'
+            ? 'this PHP does not have it — `php -m` lists what it has. Install it: in the official Docker image, `RUN docker-php-ext-install pcntl`; Homebrew\'s PHP and Debian or Ubuntu\'s php-cli come with it; a PHP built by hand needs `--enable-pcntl`.'
+            : sprintf('this PHP, which a web server runs (%s), does not have it — pcntl is built for the command line: run the parallel read from a console command or a queue job.', $sapi);
     }
 
     /**

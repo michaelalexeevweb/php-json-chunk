@@ -72,6 +72,33 @@ unlink($path);
 
 ## Several processes at once
 
+### What the parallel reads need
+
+`readInParallel()`, `forEachInParallel()` and `indexValues()` with more than one worker fork processes,
+which takes PHP's **`pcntl`** extension; **`posix`** lets a worker end without running anything of the
+process it was copied from (see [connections and memory in a worker](#connections-and-memory-in-a-worker)).
+Everything else in the library needs neither. To see what PHP has:
+
+```bash
+php -m | grep -E '^(pcntl|posix)$'
+```
+
+| Where PHP runs | `pcntl` and `posix` |
+|---|---|
+| The command line on Linux or macOS — console commands, queue workers, cron | usually there: Homebrew's PHP has both; Debian and Ubuntu's `php-cli` has both |
+| The official `php` Docker image | `posix` there; `pcntl` with `RUN docker-php-ext-install pcntl` |
+| A web request through PHP-FPM, Apache or another web server | usually not: `pcntl` is built for the command line only, or switched off in `disable_functions` — and forking a web server's process is not wanted anyway |
+| Windows | `pcntl` does not exist |
+
+So the parallel reads run where long work belongs: a console command or a queue job, started by the
+web request if need be. Where `pcntl` cannot be had, they refuse before anything is forked, with a
+`RuntimeException` that says why and what to do — none on Windows; not installed, and how to install it;
+installed but switched off by `disable_functions`; or a web server's PHP, and to run the read from the
+command line instead — and the work can still be split: `partitions()` below cuts it into parts for whatever runs your
+workers — queue jobs, separate processes, other machines.
+
+### Splitting by hand: `partitions()`
+
 An index also splits the work. `partitions()` cuts the entries into runs of consecutive entries, as even
 as can be — `Partition` objects, each with its `number`, `offset` and `limit` — and each is read with
 `readFrom()` by any kind of worker: queue jobs, separate commands, cron entries.
@@ -90,6 +117,8 @@ foreach ($index->partitions(4) as $part) {
 
 unlink($path);
 ```
+
+### Forked by the library: `forEachInParallel()` and `readInParallel()`
 
 On PHP's command line on Linux or macOS, `forEachInParallel()` forks the workers itself and waits for
 them; when any fails, it throws with what each failed with:
