@@ -9,9 +9,9 @@
 **The fastest streaming JSON reader for PHP.** Read a JSON file bigger than your memory limit, one
 item at a time — arrays or objects, at the root or anywhere inside.
 
-- **15–21× faster than JsonMachine**, at every size measured from ten thousand records to five million.
-- **Within 1.2–1.8× of `json_decode()`** up to a million records, and **ahead of it** at five million —
-  at **0.16 MB** where `json_decode()` holds 3.5 GB.
+- **19–21× faster than JsonMachine**, at every size measured from ten thousand records to five million.
+- **1.5–1.6× the time of `json_decode()`** at every size, five million records included — at
+  **0.16 MB** where `json_decode()` holds 3.5 GB.
 - **The same answers as `json_decode()`**: every root-array document of [JSONTestSuite](#conformance)
   gets PHP's own verdict, checked on every test run.
 
@@ -31,14 +31,14 @@ Everything below is detail.
 
 ## Why this one
 
-**It is the fastest of them.** 100 000 records, same file, same loop — 54 ms against JsonMachine's
-946 ms, and 8 579 ms for the slowest in the set. At five million records the gap stops being an
-abstraction: **2.7 seconds** against 47 seconds, and 6 minutes for the slowest, over the same 404 MB file.
+**It is the fastest of them.** 100 000 records, same file, same loop — 47 ms against JsonMachine's
+963 ms, and 7 257 ms for the slowest in the set. At five million records the gap stops being an
+abstraction: **2.3 seconds** against 46 seconds, and 6 minutes for the slowest, over the same 404 MB file.
 
-**It keeps up with `json_decode()`.** Reading a list a few kilobytes of elements at a time, it is 1.2×
-to 1.4× behind PHP's own parser from fifty thousand records to a million — and ahead of it at five
-million, 2.7 s against 3.0 s — while `json_decode()` holds 3.5 GB and this holds 0.16 MB. The
-[comparison](#comparison) has the numbers.
+**It keeps up with `json_decode()`.** Reading a list a few kilobytes of elements at a time, it takes 1.5
+to 1.6 times as long as PHP's own parser at every size — 2.3 s against 1.5 s at five million records —
+while `json_decode()` holds 3.5 GB and this holds 0.16 MB. The [comparison](#comparison) has the
+numbers.
 
 **Its answers match PHP's own parser.** Checked against JSONTestSuite — the corpus written to break
 JSON parsers — over 289 documents it is meant to read. Not one verdict differs from `json_decode()`.
@@ -94,38 +94,38 @@ builds forty elements at a time and lets each run go.
 ## Comparison
 
 100 000 records, an 8 MB file. Each figure is one **complete** read — every record walked to the end
-and handed back as a PHP value, no chunking. One machine, 2026-11-22 — yours will differ, so what
-matters is the shape, not the milliseconds.
+and handed back as a PHP value, no chunking. One machine, 2026-11-23, version 2.5.0, median of three
+runs — yours will differ, so what matters is the shape, not the milliseconds.
 
 | Approach | Peak memory | Streaming | Time |
 |---|---:|:--:|---:|
-| `json_decode()` on the whole file | 70.2 MB | ❌ | **42 ms** |
-| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) `Auto` (default) | **0.15 MB** | ✅ | **54 ms** |
-| `PhpJsonChunk` `Kb8` | 0.10 MB | ✅ | 62 ms |
-| `PhpJsonChunk` `Kb16` | 0.11 MB | ✅ | 57 ms |
-| `PhpJsonChunk` `Kb32` | 0.12 MB | ✅ | 55 ms |
-| `PhpJsonChunk` `Kb64` | 0.15 MB | ✅ | 54 ms |
-| `PhpJsonChunk` `Kb128` | 0.28 MB | ✅ | 53 ms |
-| `PhpJsonChunk` `Kb256` | 0.54 MB | ✅ | 53 ms |
-| `PhpJsonChunk` `Kb512` | 1.02 MB | ✅ | 53 ms |
-| `PhpJsonChunk` `Mb1` | 2.02 MB | ✅ | 53 ms |
-| [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 946 ms |
-| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 158 ms |
-| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.04 MB | ✅ | 3 018 ms¹ |
-| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.04 MB | ✅ | 3 106 ms |
-| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 8 579 ms |
+| `json_decode()` on the whole file | 70.2 MB | ❌ | **30 ms** |
+| [`PhpJsonChunk`](https://github.com/michaelalexeevweb/php-json-chunk) `Auto` (default) | **0.16 MB** | ✅ | **46 ms** |
+| `PhpJsonChunk` `Kb8` | 0.11 MB | ✅ | 53 ms |
+| `PhpJsonChunk` `Kb16` | 0.11 MB | ✅ | 49 ms |
+| `PhpJsonChunk` `Kb32` | 0.13 MB | ✅ | 47 ms |
+| `PhpJsonChunk` `Kb64` | 0.16 MB | ✅ | 46 ms |
+| `PhpJsonChunk` `Kb128` | 0.28 MB | ✅ | 45 ms |
+| `PhpJsonChunk` `Kb256` | 0.54 MB | ✅ | 45 ms |
+| `PhpJsonChunk` `Kb512` | 1.02 MB | ✅ | 45 ms |
+| `PhpJsonChunk` `Mb1` | 2.02 MB | ✅ | 45 ms |
+| [`JsonMachine`](https://github.com/halaxa/json-machine) | 0.31 MB | ✅ | 915 ms |
+| [`crocodile2u/json-streamer`](https://packagist.org/packages/crocodile2u/json-streamer) | **0.01 MB** | ✅ | 1 090 ms |
+| [`salsify/json-streaming-parser`](https://github.com/salsify/jsonstreamingparser) | 0.04 MB | ✅ | 2 910 ms¹ |
+| [`MAXakaWIZARD/JsonCollectionParser`](https://github.com/MAXakaWIZARD/JsonCollectionParser) | 0.04 MB | ✅ | 2 970 ms |
+| [`klkvsk/json-decode-stream`](https://github.com/klkvsk/json-decode-stream) | 0.04 MB | ✅ | 7 109 ms |
 
 **Read the first row before the others.** If the file fits in memory, `json_decode()` is the simplest
-thing to use, and a little faster up to a million records — 1.8× at ten thousand, 1.2× to 1.4× from
-there. Streaming buys one thing — memory that does not grow with the file — and since 1.10.0 it is
-hardly paid for in time.
+thing to use, and the faster — 1.5 to 1.6 times, at every size from ten thousand records to five
+million ([BENCHMARKS.md](BENCHMARKS.md)). Streaming buys one thing — memory that does not grow with the
+file — and pays for it with half as long again.
 
 The catch is that `json_decode()` needs about **9× the size of the file**. At five million records
-(404 MB) it wants 3.5 GB and takes 3.0 s; `PhpJsonChunk` reads the same document at **0.16 MB** in
-2.7 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
+(404 MB) it wants 3.5 GB and takes 1.5 s; `PhpJsonChunk` reads the same document at **0.16 MB** in
+2.3 s. Under the 512 MB limit many deployments run with, `json_decode()` stops at a file of roughly
 58 MB — and then the comparison between streaming readers is the only one left.
 
-Among those, this one is the fastest at every size measured — 15 to 21 times quicker than JsonMachine,
+Among those, this one is the fastest at every size measured — 19 to 21 times quicker than JsonMachine,
 which is the next one along. It is **not** the thinnest:
 `crocodile2u` holds a sixteenth of the memory. What 0.16 MB buys is a decoded PHP value per item and
 a key path to reach it.
@@ -141,7 +141,7 @@ elements — the table under the link.
 
 Ten thousand to five million records, with charts of how memory and time actually scale:
 **[BENCHMARKS.md](BENCHMARKS.md)**. The short version — memory is flat at 0.16 MB from 10 000 records
-to 5 000 000, and time is about half a millisecond per thousand records at every size measured.
+to 5 000 000, and time is under half a millisecond per thousand records at every size measured.
 
 Run it yourself; that is why the benchmark ships in the repository:
 
@@ -163,7 +163,7 @@ Compared against:
 **Requirements:** PHP 8.1+
 
 ```bash
-composer require michaelalexeevweb/php-json-chunk:^2.5.0
+composer require michaelalexeevweb/php-json-chunk:^2.5.1
 ```
 
 Upgrading? **[CHANGELOG.md](CHANGELOG.md)** — read a release's "Breaking" section first.

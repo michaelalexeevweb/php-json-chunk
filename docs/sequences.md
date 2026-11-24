@@ -39,8 +39,8 @@ between them, or each after an RFC 7464 record separator; `limit`, `offset`, `on
 | 200 000 documents (16 MB one to a line) | time |
 |---|---:|
 | one per line, `fgets()` + `json_decode()` | 85 ms |
-| one per line, `readValues()` | 93 ms |
-| pretty-printed one after another, `readValues()` | 188 ms |
+| one per line, `readValues()` | 91 ms |
+| pretty-printed one after another, `readValues()` | 184 ms |
 
 Measured with `php bin/benchmark-values.php`. Lines are taken a block at a time: split at the newlines in
 C, each decoded by itself, and taken as a document only where one starts and only when `json_decode()`
@@ -87,9 +87,9 @@ foreach ($reader->readFrom($index, 9998) as $number => $event) {
 unlink($path);
 ```
 
-Five million lines (404 MB): the last one in 2.69 s without the index, 0.1 ms with it; the index took
-2.58 s to build, once. Read with `readInParallel()`, 12 workers took 0.65 s against 4.44 s for a plain
-`readValues()` — 6.8×. Details in [BENCHMARKS.md](../BENCHMARKS.md).
+Five million lines (404 MB): the last one in 2.43 s without the index, 0.6 ms with it; the index took
+2.32 s to build, once. Read with `readInParallel()`, 12 workers took 0.54 s against 4.19 s for a plain
+`readValues()` — 7.8×. Details in [BENCHMARKS.md](../BENCHMARKS.md).
 
 A log grows by what is appended to it, and an index of it need not be made again: `extendIndex()` reads
 from its last checkpoint on, and only that. Five million lines with 50 000 appended: 0.03 s, against
@@ -112,11 +112,11 @@ of the file cut at a newline: `indexValues($path, workers: 8)`. Five million lin
 
 | workers | building the index |
 |---:|---:|
-| 1 | 2.65 s |
-| 2 | 1.38 s |
-| 4 | 0.71 s |
-| 8 | 0.44 s |
-| 12 | 0.37 s |
+| 1 | 2.32 s |
+| 2 | 1.37 s |
+| 4 | 0.70 s |
+| 8 | 0.40 s |
+| 12 | 0.34 s |
 
 Every line is checked to be a whole document, since a pretty-printed one has newlines inside and a
 line of it can pass for a document of its own; a file with one line that is not — or a broken line, a

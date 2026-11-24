@@ -1,15 +1,16 @@
 # Benchmarks
 
 Six libraries and plain `json_decode()`, over the same documents, from ten thousand records to five
-million. One machine, 2026-11-22, PHP 8.4, opcache off, median of 2 runs (`json_decode()`: of 3, and
-one at five million). Yours will differ — what carries over is the **shape** of each line, not the
-milliseconds.
+million. One machine, 2026-11-23, PHP 8.4, opcache off, version 2.5.0, median of 2 runs (`json_decode()`:
+of 3), load around four to five. Yours will differ — what carries over is the **shape** of each line,
+not the milliseconds.
 
-**Which version.** The tables were taken with 1.12.0. On 2026-11-23, 1.18.1 was measured against
-1.12.0 on the same machine, the two runs taking turns, at every size from a hundred thousand records
-to five million: the same times within noise — 55 ms against 55–58 ms at 100 000 records, 2.79–2.83 s
-against 2.76–2.91 s at five million. Nothing since has changed how fast a list is read; what did change
-is listed in the [changelog](CHANGELOG.md).
+**Which version.** The tables were taken with 2.5.0. The previous ones, taken with 1.12.0 on 2026-11-22
+on a busier machine, put this library at 54 ms for a hundred thousand records and `json_decode()` at
+42 ms; this run puts them at 47 ms and 30 ms. This library is about 15 % faster since — 2.4.0 hands values
+on without a generator in between — and `json_decode()` was slowed then by the load, most of all at five
+million records, where it needs 3.5 GB: 2.95 s then, 1.52 s now. What changed is listed in the
+[changelog](CHANGELOG.md).
 
 Reproducible from the repository:
 
@@ -23,28 +24,26 @@ Back to the [README](README.md).
 
 ## The question worth asking first
 
-**Does the file fit in memory?** If it does, `json_decode()` is still the simplest thing to use — but
-it is no longer much faster: 1.8× at ten thousand records, 1.2× to 1.4× from fifty thousand to a
-million, and at five million records this library is **faster** than it, 2.66 s against 2.95 s.
-Streaming used to be paid for in time. Since 1.10.0 it barely is.
+**Does the file fit in memory?** If it does, `json_decode()` is the simplest thing to use, and the
+faster: this library takes 1.5 to 1.6 times as long at every size measured, from ten thousand records
+to five million. Streaming is paid for in time — half as long again — and in nothing else.
 
 `json_decode()` on the whole file, same documents:
 
 | Records | File | Time | Peak memory | Under a 512 MB limit |
 |---:|---:|---:|---:|:--|
-| 10k | 0.8 MB | 3.6 ms | 7.1 MB | fine |
-| 50k | 3.9 MB | 20 ms | 35.1 MB | fine |
-| 100k | 7.9 MB | 42 ms | 70.2 MB | fine |
-| 500k | 39.9 MB | 209 ms | 349.3 MB | fine |
-| 1M | 80.0 MB | 445 ms | 698.8 MB | **out of memory** |
-| 5M | 404.3 MB | 2 951 ms | **3 545.9 MB** | **out of memory** |
+| 10k | 0.8 MB | 3.0 ms | 7.1 MB | fine |
+| 50k | 3.9 MB | 15.5 ms | 35.1 MB | fine |
+| 100k | 7.9 MB | 29.7 ms | 70.2 MB | fine |
+| 500k | 39.9 MB | 149 ms | 349.3 MB | fine |
+| 1M | 80.0 MB | 297 ms | 698.8 MB | **out of memory** |
+| 5M | 404.3 MB | 1 522 ms | **3 545.9 MB** | **out of memory** |
 
 It needs about **9× the size of the file**, every time — between 8.7× and 8.9× at every size
-measured — and that ratio does not improve. Give PHP 4 GB and it reads the 404 MB document in under
-three seconds. Give it the 512 MB that many deployments run with, and it stops at a file of roughly
-58 MB.
+measured — and that ratio does not improve. Give PHP 4 GB and it reads the 404 MB document in a second
+and a half. Give it the 512 MB that many deployments run with, and it stops at a file of roughly 58 MB.
 
-`PhpJsonChunk` reads that same 404 MB document at **0.16 MB**, in 2.66 s.
+`PhpJsonChunk` reads that same 404 MB document at **0.16 MB**, in 2.28 s.
 
 ## Memory: flat against climbing
 
@@ -70,31 +69,31 @@ xychart-beta
     title "Time (seconds) by record count"
     x-axis "records" [10k, 50k, 100k, 500k, 1M, 5M]
     y-axis "seconds" 0 --> 370
-    line "json_decode()" [0.004, 0.02, 0.04, 0.21, 0.45, 2.95]
-    line "PhpJsonChunk" [0.01, 0.03, 0.05, 0.27, 0.54, 2.66]
-    line "JsonMachine" [0.10, 0.48, 0.95, 5.77, 9.24, 46.56]
-    line "crocodile2u" [0.12, 0.60, 1.16, 5.67, 11.14, 55.72]
-    line "Salsify" [0.31, 1.60, 3.02, 15.11, 29.91, 150.68]
-    line "JsonCollectionParser" [0.32, 1.57, 3.11, 15.47, 30.61, 154.11]
-    line "JsonDecodeStream" [0.74, 3.73, 8.58, 36.37, 72.13, 360.79]
+    line "json_decode()" [0.003, 0.02, 0.03, 0.15, 0.30, 1.52]
+    line "PhpJsonChunk" [0.005, 0.02, 0.05, 0.24, 0.45, 2.28]
+    line "JsonMachine" [0.09, 0.46, 0.96, 4.66, 9.24, 46.13]
+    line "crocodile2u" [0.11, 0.56, 1.17, 5.48, 11.64, 55.21]
+    line "Salsify" [0.30, 1.54, 2.98, 14.73, 29.63, 150.97]
+    line "JsonCollectionParser" [0.30, 1.52, 3.06, 15.32, 30.46, 153.43]
+    line "JsonDecodeStream" [0.72, 3.63, 7.26, 35.95, 71.94, 360.74]
 ```
 
 Nothing here degrades as the file grows — every line is straight, so a document ten times bigger takes
 ten times longer and no worse. What separates them is the constant, and the spread is wide: at five
-million records the range is 2.7 s to 361 s. `PhpJsonChunk` and `json_decode()` lie on top of each other
+million records the range is 2.3 s to 361 s. `PhpJsonChunk` and `json_decode()` lie on top of each other
 along the bottom.
 
-`PhpJsonChunk` reads **about half a millisecond per thousand records** at every size measured:
+`PhpJsonChunk` reads **under half a millisecond per thousand records** at every size measured:
 
 | Records | 10k | 50k | 100k | 500k | 1M | 5M |
 |---|---:|---:|---:|---:|---:|---:|
-| ms per 1 000 records | 0.64 | 0.56 | 0.54 | 0.55 | 0.54 | 0.53 |
+| ms per 1 000 records | 0.47 | 0.46 | 0.47 | 0.49 | 0.45 | 0.46 |
 
 ## The numbers
 
 **Every number is one complete read**: open the file, walk every record to the end, hand each one back
 as a PHP value. Not a chunk, not a sample, and no `chunkSize` — the loop is item by item. So the
-5 000 000 row is five million records read, and 2 660 ms over five million records is **0.53 µs
+5 000 000 row is five million records read, and 2 280 ms over five million records is **0.46 µs
 per record**.
 
 Time in milliseconds, with the wall-clock reading beneath it once milliseconds stop being legible.
@@ -103,16 +102,16 @@ streaming reader, and its column is there to be beaten on memory.
 
 | Records | `json_decode()` | PhpJsonChunk | JsonMachine | crocodile2u | Salsify¹ | JsonCollectionParser | JsonDecodeStream |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 10k | *3.6* | **6.4** | 97.9 | 122.2 | 308.9 | 322.9 | 742.5 |
-| 50k | *20.1* | **27.8** | 484.6 | 601.3 | 1 597.6 | 1 573.0 | 3 726.1 |
-| 100k | *41.7* | **53.9** | 946.0 | 1 157.9 | 3 018.0 | 3 105.5 | 8 579.0 |
-| 500k | *208.9* | **272.5** | 5 770.1 | 5 668.7 | 15 105.1<br><sub>15 s</sub> | 15 474.5<br><sub>15 s</sub> | 36 369.9<br><sub>36 s</sub> |
-| 1M | *445.0* | **537.3** | 9 240.6 | 11 139.8<br><sub>11 s</sub> | 29 905.3<br><sub>30 s</sub> | 30 612.2<br><sub>31 s</sub> | 72 130.3<br><sub>1m 12s</sub> |
-| 5M | *2 951.0*<br><sub>3.0 s</sub> | **2 659.6**<br><sub>**2.7 s**</sub> | 46 564.9<br><sub>47 s</sub> | 55 719.3<br><sub>56 s</sub> | 150 678.4<br><sub>2m 31s</sub> | 154 110.3<br><sub>2m 34s</sub> | 360 794.6<br><sub>6m 1s</sub> |
+| 10k | *3.0* | **4.7** | 93.7 | 111.5 | 296.6 | 302.0 | 717.9 |
+| 50k | *15.5* | **23.2** | 464.7 | 560.7 | 1 543.0 | 1 521.7 | 3 626.0 |
+| 100k | *29.7* | **46.8** | 962.9 | 1 168.7 | 2 978.1 | 3 055.1 | 7 257.2 |
+| 500k | *149.1* | **243.8** | 4 660.2 | 5 482.2 | 14 725.2<br><sub>15 s</sub> | 15 322.1<br><sub>15 s</sub> | 35 950.6<br><sub>36 s</sub> |
+| 1M | *297.4* | **451.6** | 9 240.7 | 11 638.6<br><sub>12 s</sub> | 29 628.9<br><sub>30 s</sub> | 30 458.2<br><sub>30 s</sub> | 71 938.6<br><sub>1m 12s</sub> |
+| 5M | *1 521.9*<br><sub>1.5 s</sub> | **2 280.1**<br><sub>**2.3 s**</sub> | 46 129.9<br><sub>46 s</sub> | 55 207.3<br><sub>55 s</sub> | 150 974.0<br><sub>2m 31s</sub> | 153 428.2<br><sub>2m 33s</sub> | 360 740.9<br><sub>6m 1s</sub> |
 | **peak MB** | **7.1 → 3 546** | 0.16 | 0.31 | **0.01** | 0.03–0.04 | 0.03–0.04 | 0.04 |
 
-Five million records is where the spread stops being an abstraction: under three seconds against six
-minutes, over the same 404 MB file.
+Five million records is where the spread stops being an abstraction: two seconds against six minutes,
+over the same 404 MB file.
 
 **Read the last row across, not down.** Every streaming reader holds the same memory at ten thousand
 records as at five million — two of them wander by a hundredth of a megabyte between sizes, which is
@@ -120,13 +119,11 @@ rounding, not growth. `json_decode()` has an arrow instead of a number, because 
 file: close to 9× of it, every time. That is the only difference in this table that changes what is
 possible, rather than what is quick.
 
-`json_decode()` is faster than this library at small sizes and barely faster in the middle — 1.8× at
-ten thousand records, 1.3× at a hundred thousand, 1.2× at a million — and slower at five million. It
-stops running at a file of roughly 58 MB under a 512 MB limit, and that is the whole reason the rest of
-this table exists.
+`json_decode()` is faster than this library at every size — 1.5 to 1.6 times. It stops running at a
+file of roughly 58 MB under a 512 MB limit, and that is the whole reason the rest of this table exists.
 
-Among the streaming readers, `PhpJsonChunk` is the fastest at every size — **15 to 21 times** quicker
-than JsonMachine, the next one along: 15× at ten thousand records, 17.6× at a hundred thousand, 17.5× at
+Among the streaming readers, `PhpJsonChunk` is the fastest at every size — **19 to 21 times** quicker
+than JsonMachine, the next one along: 20× at ten thousand records, 21× at a hundred thousand, 20× at
 five million.
 
 It is **not** the thinnest: `crocodile2u` holds a sixteenth of the memory and three others hold about a
@@ -140,32 +137,31 @@ Every other column hands back a PHP value for each element, and the benchmark it
 ## Every reader and every block size
 
 The same documents again, with this library at each of its [block sizes](docs/reading.md#block-size-memory-against-speed)
-— time in milliseconds. Its nine rows come from their own run, five rounds each; `Kb64`, which every
-earlier figure on this page was measured with, read 100 000 records in 54.0 ms there and 53.9 ms in the
-run above, so the rows sit together fairly.
+— time in milliseconds. Its nine rows come from their own run, five rounds each; the default read
+100 000 records in 44.6 ms there and in 46.8 ms in the run above, so the rows sit together fairly.
 
 | Reader | 10k | 50k | 100k | 500k | 1M | 5M | peak MB |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `json_decode()` | *3.6* | *20.1* | *41.7* | *208.9* | *445.0* | *2 951* | 7.1 → 3 546 |
-| **PhpJsonChunk `Auto`** (default) | 5.3 | 26.5 | 54.2 | 272.4 | 549.9 | 2 757 | 0.15–0.16 |
-| PhpJsonChunk `Kb8` | 6.3 | 30.2 | 62.1 | 314.2 | 656.9 | 3 097 | **0.10** |
-| PhpJsonChunk `Kb16` | 5.8 | 28.4 | 57.3 | 300.8 | 578.9 | 2 904 | 0.11 |
-| PhpJsonChunk `Kb32` | 5.5 | 27.2 | 55.3 | 284.4 | 544.9 | 2 815 | 0.12 |
-| PhpJsonChunk `Kb64` | 5.4 | 26.7 | 54.0 | 267.0 | 542.7 | 2 736 | 0.15–0.16 |
-| PhpJsonChunk `Kb128` | 5.3 | 26.3 | 52.9 | 275.6 | 547.5 | 2 737 | 0.27–0.29 |
-| PhpJsonChunk `Kb256` | 5.3 | 26.1 | 53.2 | 266.1 | 543.5 | 2 640 | 0.52–0.55 |
-| PhpJsonChunk `Kb512` | 5.2 | 26.2 | 52.8 | 264.2 | 528.9 | 2 675 | 1.02–1.04 |
-| PhpJsonChunk `Mb1` | 5.2 | 26.1 | 52.5 | 273.6 | 530.3 | 2 668 | 1.09–2.05 |
-| JsonMachine | 97.9 | 484.6 | 946.0 | 5 770 | 9 241 | 46 565 | 0.31 |
-| crocodile2u | 122.2 | 601.3 | 1 158 | 5 669 | 11 140 | 55 719 | 0.01 |
-| Salsify¹ | 308.9 | 1 598 | 3 018 | 15 105 | 29 905 | 150 678 | 0.03–0.04 |
-| JsonCollectionParser | 322.9 | 1 573 | 3 106 | 15 474 | 30 612 | 154 110 | 0.03–0.04 |
-| JsonDecodeStream | 742.5 | 3 726 | 8 579 | 36 370 | 72 130 | 360 795 | 0.04 |
+| `json_decode()` | *3.0* | *15.5* | *29.7* | *149.1* | *297.4* | *1 522* | 7.1 → 3 546 |
+| **PhpJsonChunk `Auto`** (default) | 4.5 | 21.9 | 44.6 | 221.9 | 440.0 | 2 269 | 0.16 |
+| PhpJsonChunk `Kb8` | 5.4 | 25.8 | 53.5 | 265.8 | 533.7 | 2 789 | **0.11** |
+| PhpJsonChunk `Kb16` | 5.0 | 23.9 | 48.1 | 241.4 | 485.7 | 2 478 | 0.11 |
+| PhpJsonChunk `Kb32` | 4.7 | 23.3 | 45.3 | 230.0 | 456.5 | 2 355 | 0.13 |
+| PhpJsonChunk `Kb64` | 4.5 | 21.8 | 44.6 | 218.1 | 444.7 | 2 301 | 0.16 |
+| PhpJsonChunk `Kb128` | 4.5 | 21.6 | 43.2 | 220.3 | 439.1 | 2 271 | 0.27–0.29 |
+| PhpJsonChunk `Kb256` | 4.4 | 22.1 | 43.5 | 217.4 | 434.8 | 2 290 | 0.52–0.55 |
+| PhpJsonChunk `Kb512` | 4.5 | 21.8 | 44.0 | 214.3 | 429.8 | 2 285 | 1.02–1.04 |
+| PhpJsonChunk `Mb1` | 4.5 | 22.2 | 43.3 | 213.8 | 432.7 | 2 241 | 1.10–2.05 |
+| JsonMachine | 93.7 | 464.7 | 962.9 | 4 660 | 9 241 | 46 130 | 0.31 |
+| crocodile2u | 111.5 | 560.7 | 1 169 | 5 482 | 11 639 | 55 207 | 0.01 |
+| Salsify¹ | 296.6 | 1 543 | 2 978 | 14 725 | 29 629 | 150 974 | 0.03–0.04 |
+| JsonCollectionParser | 302.0 | 1 522 | 3 055 | 15 322 | 30 458 | 153 428 | 0.03–0.04 |
+| JsonDecodeStream | 717.9 | 3 626 | 7 257 | 35 951 | 71 939 | 360 741 | 0.04 |
 
-On records this small the block hardly moves the time — `Kb8` is 15% behind at worst, and everything
-from 32 KB up is within a few percent — while memory goes from 0.10 MB to 2 MB. `Auto` stays at 64 KB on
-such records and reads like `Kb64`. Where the block decides the time is large elements; the README
-[measures that](docs/reading.md#block-size-memory-against-speed).
+On records this small the block hardly moves the time — `Kb8` is about 20% behind, and everything
+from 32 KB up is within a few percent — while memory goes from 0.11 MB to 2 MB. `Auto` stays at 64 KB on
+such records and reads like `Kb64`. Where the block decides the time is large elements;
+[measured there](docs/reading.md#block-size-memory-against-speed) with `php bin/benchmark-blocks.php`.
 
 ## An index, and workers side by side
 
@@ -175,73 +171,72 @@ Reproducible with:
 php bin/benchmark-index.php --workers=1,2,4,6,8,12,16
 ```
 
-The same five million records, 1.19.0's index and 1.20.0's workers, one run on a quiet machine
-(2026-11-23, twelve cores: six performance, six efficiency):
+The same five million records, measured with 2.5.0 on a quiet machine (2026-11-23, load around five,
+twelve cores: six performance, six efficiency):
 
 | | time |
 |---|---:|
-| building the index — 4 929 checkpoints, saved as 94 KB | 2.17 s |
-| `getNth(4_999_999)`, no index | 2.38 s |
+| building the index — 4 929 checkpoints, saved as 94 KB | 2.16 s |
+| `getNth(4_999_999)`, no index | 2.34 s |
 | `readFrom($index, 4_999_999, 1)` | 0.0002 s |
 
-One pass with every record encoded and hashed — light work, as any real handler's is at the least:
+One pass with every record encoded and hashed — light work, as any real handler's is at the least —
+through `forEachInParallel()`, a call per record, and `readInParallel()`, a call per part:
 
-| workers | time | against a plain read |
-|---:|---:|---:|
-| none (a plain read) | 4.54 s | |
-| 1 | 4.96 s | 0.9× |
-| 2 | 2.54 s | 1.8× |
-| 4 | 1.30 s | 3.5× |
-| 6 | 0.88 s | 5.1× |
-| 8 | 0.75 s | 6.0× |
-| 12 | 0.62 s | 7.3× |
-| 16 | 0.62 s | 7.3× |
+| workers | `forEachInParallel()` | | `readInParallel()` | |
+|---:|---:|---:|---:|---:|
+| none (a plain read) | 4.09 s | | 4.09 s | |
+| 1 | 4.91 s | 0.8× | 4.63 s | 0.9× |
+| 2 | 2.53 s | 1.6× | 2.37 s | 1.7× |
+| 4 | 1.28 s | 3.2× | 1.21 s | 3.4× |
+| 6 | 0.87 s | 4.7× | 0.82 s | 5.0× |
+| 8 | 0.74 s | 5.5× | 0.70 s | 5.9× |
+| 12 | 0.61 s | 6.7× | 0.57 s | 7.1× |
+| 16 | 0.60 s | 6.8× | 0.57 s | 7.1× |
 
 It grows with the workers up to the cores and stops there. One worker is slower than a plain loop — a
-call per record, and a fork. A handler that waits on a database or the network gains from more workers
-than cores; this one does not wait.
-
-`readInParallel()` — the handler called once a part, returning how many it read — measured in the same
-run as `forEachInParallel()` (a later one, load around five): 1.22 s against 1.30 s at four workers,
-0.83 s against 0.90 s at six, 0.61 s against 0.65 s at twelve. One worker is as fast as a plain loop
-with it, the handler called once instead of once a record.
+fork, and with `forEachInParallel()` a call per record. A handler that waits on a database or the
+network gains from more workers than cores; this one does not wait. The plain read is faster than it
+was in 2.3.0 — 4.54 s then — since 2.4.0 hands values on without a generator in between, so the
+multiples here are a little smaller and the times a little better.
 
 ### The same records as NDJSON
 
-2.1.0's `indexValues()`, in the same run: the five million records one to a line, 404 MB.
+`indexValues()`, in the same run: the five million records one to a line, 404 MB.
 
 | | time |
 |---|---:|
-| building the index — 3 235 checkpoints | 2.58 s |
-| `readValues($path, 1, 4_999_999)`, no index | 2.69 s |
-| `readFrom($index, 4_999_999, 1)` | 0.0001 s |
+| building the index — 5 000 checkpoints | 2.32 s |
+| `readValues($path, 1, 4_999_999)`, no index | 2.43 s |
+| `readFrom($index, 4_999_999, 1)` | 0.0006 s |
 
 | workers, `readInParallel()` | time | against a plain read |
 |---:|---:|---:|
-| none (a plain `readValues()`) | 4.44 s | |
-| 1 | 4.87 s | 0.9× |
-| 2 | 2.50 s | 1.8× |
-| 4 | 1.28 s | 3.5× |
-| 6 | 0.88 s | 5.1× |
-| 8 | 0.74 s | 6.0× |
-| 12 | 0.65 s | 6.8× |
+| none (a plain `readValues()`) | 4.19 s | |
+| 1 | 4.51 s | 0.9× |
+| 2 | 2.32 s | 1.8× |
+| 4 | 1.17 s | 3.6× |
+| 6 | 0.79 s | 5.3× |
+| 8 | 0.67 s | 6.2× |
+| 12 | 0.54 s | 7.8× |
+| 16 | 0.55 s | 7.6× |
 
-Fewer checkpoints than the list's: lines are taken up to 64 KB at a time, and a checkpoint can only fall
-where a batch starts — about every 1 500 lines here, not every 1 000.
+A checkpoint every 1 000 lines exactly: since 2.2.0 the checkpoints due inside a batch of lines are
+found in it, where before they fell only where a batch started.
 
 ### Building an NDJSON index with workers
 
-2.3.0's `indexValues($path, workers: N)`, the same five million lines (404 MB), best of two, load
+`indexValues($path, workers: N)`, the same five million lines (404 MB), best of two, 2.5.0, load
 around five:
 
 | workers | building the index | against one process |
 |---:|---:|---:|
-| 1 | 2.65 s | |
-| 2 | 1.38 s | 1.9× |
-| 4 | 0.71 s | 3.7× |
-| 6 | 0.48 s | 5.5× |
-| 8 | 0.44 s | 6.0× |
-| 12 | 0.37 s | 7.2× |
+| 1 | 2.32 s | |
+| 2 | 1.37 s | 1.7× |
+| 4 | 0.70 s | 3.3× |
+| 6 | 0.48 s | 4.8× |
+| 8 | 0.40 s | 5.8× |
+| 12 | 0.34 s | 6.8× |
 
 ### `readValues()`: one to a line, and pretty-printed
 
@@ -249,14 +244,16 @@ around five:
 php bin/benchmark-values.php
 ```
 
-| 200 000 documents (16 MB one to a line) | 2.0.0 | 2.1.0 |
-|---|---:|---:|
-| one per line, `fgets()` + `json_decode()` | 88 ms | 84 ms |
-| one per line, `readValues()` | 182 ms | 100 ms |
-| pretty-printed one after another, `readValues()` | 205 ms | 180 ms |
+| 200 000 documents (16 MB one to a line) | 2.0.0 | 2.1.0 | 2.5.0 |
+|---|---:|---:|---:|
+| one per line, `fgets()` + `json_decode()` | 88 ms | 84 ms | 85 ms |
+| one per line, `readValues()` | 182 ms | 100 ms | 91 ms |
+| pretty-printed one after another, `readValues()` | 205 ms | 180 ms | 184 ms |
 
-2.0.0 measured from a copy of its source in the same session, load around fourteen; 2.1.0 on a quiet
-machine. Within one run the two stood at 182 and 104 ms.
+2.0.0 measured from a copy of its source in the same session, load around fourteen; 2.1.0 and 2.5.0 on a
+quiet machine. Within one run 2.0.0 and 2.1.0 stood at 182 and 104 ms. 2.3.1 took the lines of a block
+straight on to the reader, without gathering them first, and a line cut by the end of a block the fast
+way too: what is left between `readValues()` and the plain loop is the generator.
 
 A run with the machine busy — a virtual machine taking two cores — gave 5.2× at six workers and *less* at
 twelve than at eight: the workers had no cores to run on. Measure on a quiet machine.

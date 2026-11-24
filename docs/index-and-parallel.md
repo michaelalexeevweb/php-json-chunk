@@ -26,8 +26,8 @@ unlink($path . '.idx');
 
 | 5 000 000 records (404 MB) | time |
 |---|---:|
-| `getNth(4_999_999)`, no index | 2.38 s |
-| building the index, once | 2.17 s |
+| `getNth(4_999_999)`, no index | 2.34 s |
+| building the index, once | 2.16 s |
 | `readFrom($index, 4_999_999, 1)` | 0.2 ms |
 
 `readFrom()` gives what `readGenerator()` with the same key path, offset and limit gives, keys included.
@@ -205,19 +205,20 @@ Measured on five million records, each encoded and hashed (`php bin/benchmark-in
 
 | workers | time | against a plain read |
 |---:|---:|---:|
-| none (a plain read) | 4.54 s | |
-| 1 | 4.96 s | 0.9× |
-| 2 | 2.54 s | 1.8× |
-| 4 | 1.30 s | 3.5× |
-| 6 | 0.88 s | 5.1× |
-| 8 | 0.75 s | 6.0× |
-| 12 | 0.62 s | 7.3× |
-| 16 | 0.62 s | 7.3× |
+| none (a plain read) | 4.09 s | |
+| 1 | 4.91 s | 0.8× |
+| 2 | 2.53 s | 1.6× |
+| 4 | 1.28 s | 3.2× |
+| 6 | 0.87 s | 4.7× |
+| 8 | 0.74 s | 5.5× |
+| 12 | 0.61 s | 6.7× |
+| 16 | 0.60 s | 6.8× |
 
 Twelve cores here — six performance, six efficiency — and twelve workers is where it stops getting
 faster. One worker is a little slower than a plain loop: the handler is a call per record, and the fork
-costs something; parallel pays from two. Building the index took 2.17 s, once. `readInParallel()`, the
-handler called once a part, runs as fast or a few per cent faster.
+costs something; parallel pays from two. Building the index took 2.16 s, once. `readInParallel()`, the
+handler called once a part, runs a few per cent faster: 0.57 s at twelve workers, 7.1×. Measured with
+2.5.0.
 
 `Workers::Auto` in place of a number forks as many workers as this process has cores: on Linux the
 fewest of the processors, the ones its cgroup lets it run on, and its cgroup's CPU quota — a container
@@ -258,6 +259,15 @@ one and never touch the old one; keep a reference to it, so that it is not destr
 runs. A worker ends without running destructors — it ends itself with SIGKILL once its result is sent —
 so the old connection is never closed by it, and the caller goes on using its own after the read. This
 needs PHP's posix extension: without it a worker ends with `exit()`, and destroys what it holds.
+
+Measured with MySQL 8.4 and PHP 8.4, the caller running `SELECT 1` on its own connection after each:
+
+| In the worker | The caller's connection |
+|---|---|
+| the inherited PDO destroyed (`$pdo = null`, as `DB::purge()` does) | gone: "2006 MySQL server has gone away" |
+| left alone, the worker ending with SIGKILL, as this library's do | open |
+| left alone, the worker ending with `exit()` — no posix extension | gone |
+| the recipe below, through `readInParallel()` | open, 4 000 rows written by four workers |
 
 ```php
 // Recipe: needs pcntl and a database — checked for syntax by the tests, not run.

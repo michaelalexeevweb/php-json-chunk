@@ -3,6 +3,14 @@
 Every release from 1.2.1 on. Earlier ones — 1.0.0 to 1.1.2 — are described only in the
 [GitHub releases](https://github.com/michaelalexeevweb/php-json-chunk/releases).
 
+## 2.5.1 — 2026-11-24
+
+### Documentation
+
+- **Every benchmark taken again, with 2.5.0, on a quiet machine — and one claim withdrawn.** The README said this library reads five million records faster than `json_decode()`, 2.7 s against 3.0 s. It does not: that `json_decode()` figure was taken on a busy machine, where its 3.5 GB was slowed most. Measured again, `json_decode()` reads them in 1.5 s and this library in 2.3 s, and it is 1.5 to 1.6 times as fast at every size, from ten thousand records to five million. The README says so now. This library itself is about 15 % faster than the old tables showed — 47 ms for a hundred thousand records, 2.28 s for five million — and 19 to 21 times as fast as JsonMachine, which stands where it stood. BENCHMARKS.md, its charts, the block sizes, the index and the workers, NDJSON, and the pages of `docs/` carry the new figures.
+- **`bin/benchmark-blocks.php`**: every `BlockSize` against elements of a few hundred bytes, 10 KB and 186 KB, which the README's table of block sizes had no script to take again.
+- **Connections in a worker, measured.** With MySQL 8.4 and PHP 8.4: a worker that destroys the PDO it was copied with closes the caller's connection — "2006 MySQL server has gone away" — and so does a worker ending with `exit()`; one ending with SIGKILL, as this library's do, leaves it open, and the recipe of `docs/index-and-parallel.md` writes its 4 000 rows with the caller's connection still open after.
+
 ## 2.5.0 — 2026-11-23
 
 ### Added

@@ -367,24 +367,25 @@ $lean = new JsonChunkReader(blockSize: BlockSize::Kb16);   // never more than a 
 **Which one:**
 
 - **Don't know, or it varies** — `Auto`, the default.
-- **Every kilobyte counts, records are small** — `Kb16` or `Kb8`: 0.04–0.05 MB less than the default,
-  5% to 15% slower.
+- **Every kilobyte counts, records are small** — `Kb16` or `Kb8`: 0.08 MB less than the default,
+  9% to 20% slower.
 - **Memory must stay bounded, and elements may be large** — the largest fixed size you can afford; at
   least eight times the element is when it is read fastest.
 
-Measured on three 18–80 MB documents — a million small records, elements of 10 KB, elements of 186 KB:
+Measured on three 18–80 MB documents — a million small records, elements of 10 KB, elements of 186 KB —
+with 2.5.0, best of three (`php bin/benchmark-blocks.php`):
 
 | `BlockSize` | small records | 10 KB elements | 186 KB elements |
 |---|---:|---:|---:|
-| **`Auto`** (default) | **501 ms · 0.18 MB** | **545 ms · 0.75 MB** | **706 ms · 12.8 MB** |
-| `Kb8` | 645 ms · 0.12 MB | 2 085 ms · 0.43 MB | 1 964 ms · 7.8 MB |
-| `Kb16` | 563 ms · 0.13 MB | 1 582 ms · 0.64 MB | 2 069 ms · 7.8 MB |
-| `Kb32` | 546 ms · 0.14 MB | 1 002 ms · 0.66 MB | 2 045 ms · 7.8 MB |
-| `Kb64` | 540 ms · 0.18 MB | 711 ms · 0.69 MB | 2 022 ms · 7.9 MB |
-| `Kb128` | 518 ms · 0.31 MB | 574 ms · 0.75 MB | 2 041 ms · 7.9 MB |
-| `Kb256` | 495 ms · 0.57 MB | 469 ms · 0.88 MB | 1 572 ms · 12.0 MB |
-| `Kb512` | 504 ms · 1.05 MB | 450 ms · 1.24 MB | 1 035 ms · 12.3 MB |
-| `Mb1` | 524 ms · 2.05 MB | 434 ms · 2.24 MB | 710 ms · 12.8 MB |
+| **`Auto`** (default) | **439 ms · 0.19 MB** | **544 ms · 0.56 MB** | **702 ms · 9.0 MB** |
+| `Kb8` | 529 ms · 0.11 MB | 2 084 ms · 0.43 MB | 1 959 ms · 7.8 MB |
+| `Kb16` | 479 ms · 0.11 MB | 1 524 ms · 0.45 MB | 1 961 ms · 7.8 MB |
+| `Kb32` | 452 ms · 0.13 MB | 976 ms · 0.46 MB | 1 976 ms · 7.8 MB |
+| `Kb64` | 437 ms · 0.16 MB | 682 ms · 0.50 MB | 1 999 ms · 7.9 MB |
+| `Kb128` | 431 ms · 0.29 MB | 542 ms · 0.56 MB | 2 031 ms · 7.9 MB |
+| `Kb256` | 428 ms · 0.55 MB | 470 ms · 0.74 MB | 1 588 ms · 8.2 MB |
+| `Kb512` | 425 ms · 1.02 MB | 432 ms · 1.24 MB | 977 ms · 8.5 MB |
+| `Mb1` | 425 ms · 2.02 MB | 419 ms · 2.24 MB | 666 ms · 9.0 MB |
 
 - **Small records** barely care: a smaller block saves a few hundredths of a megabyte, a larger one a few
   percent of time — and `Auto` stays at 64 KB.

@@ -1,6 +1,6 @@
 {
     "name": "michaelalexeevweb/php-json-chunk",
-    "description": "The fastest streaming JSON reader for PHP, and a writer to match — read and write JSON larger than memory, an item at a time: arrays, objects, NDJSON; raw, validated, indexed, in parallel. 15–21× faster than JsonMachine at 0.16 MB.",
+    "description": "The fastest streaming JSON reader for PHP, and a writer to match — read and write JSON larger than memory, an item at a time: arrays, objects, NDJSON; raw, validated, indexed, in parallel. About 20× faster than JsonMachine, at 0.16 MB.",
     "type": "library",
     "license": "MIT",
     "homepage": "https://github.com/michaelalexeevweb/php-json-chunk",
